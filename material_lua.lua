@@ -2115,7 +2115,7 @@ function Material.Load(Config)
 			ToggleTracker.Size = UDim2.fromOffset(26,12)
 			ToggleTracker.Position = UDim2.fromScale(1,0.5) - UDim2.fromOffset(41,6)
 			ToggleTracker.ImageColor3 = Theme.Toggle
-			ToggleTracker.ImageTransparency = 1
+			ToggleTracker.ImageTransparency = 0
 			ToggleTracker.Parent = Toggle
 
 			local Dot = Objects.new("Circle")
