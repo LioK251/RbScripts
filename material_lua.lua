@@ -2132,7 +2132,7 @@ function Material.Load(Config)
 			DotShadow.ScaleType = Enum.ScaleType.Stretch
 			DotShadow.Size = UDim2.fromOffset(31,31)
 			DotShadow.Position = UDim2.fromOffset(-8,-8)
-			DotShadow.ImageColor3 = Theme.Toggle
+			DotShadow.ImageColor3 = Color3.fromRGB(25,255,0)
 			DotShadow.ImageTransparency = 1
 			DotShadow.Parent = Dot
 
