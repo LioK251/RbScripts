@@ -192,9 +192,9 @@ mainTab:Toggle("Inf Heal [Semi God Mode]", false, function(t)
             if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
 
             for i, v in pairs(game.Workspace.Fountains.Fountain:GetDescendants()) do
-                if v:IsA("TouchTransmitter") then
-                    firetouchinterest(lp.Character:WaitForChild("HumanoidRootPart"), v.Parent, 0)
-                    firetouchinterest(lp.Character:WaitForChild("HumanoidRootPart"), v.Parent, 1)
+                if v:IsA("TouchTransmitter") and v.Parent then
+                    firetouchinterest(game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart"), v.Parent, 0)
+                    firetouchinterest(game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart"), v.Parent, 1)
                 end
             end
         end
