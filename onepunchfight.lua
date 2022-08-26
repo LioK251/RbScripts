@@ -32,7 +32,7 @@ local char = lp.Character
 setfflag("HumanoidParallelRemoveNoPhysics", "False")
 setfflag("HumanoidParallelRemoveNoPhysicsNoSimulate2", "False")
 
-local function getAreas()
+function getAreas()
     local t = {}
 
     for i,v in pairs(game:GetService("Workspace")["__TrainingZones"]:GetChildren()) do
@@ -50,6 +50,26 @@ local function getAreas()
     
     return t
 end
+
+function getEggs()
+    local t = {}
+    
+    for i, v in pairs(game:GetService("Workspace")["__Zones"]["__Summons"]:GetChildren()) do
+        if v:IsA("Part") and not table.find(t, v.Name) then
+            table.insert(t, v.Name)
+        end
+    end
+    
+    table.sort(t, function(a, s)
+        local a1 = tonumber(string.match(a, "%d+"))
+        local b1 = tonumber(string.match(s, "%d+"))
+
+        return a1 < b1
+    end)
+    
+    return t
+end
+
 
 mainTab:Dropdown("Select Area", getAreas(), function(t)
     getgenv().Area = t
@@ -126,7 +146,7 @@ mainTab:Button("Rejoin", function()
     game:GetService('TeleportService'):TeleportToPlaceInstance(game.PlaceId, game.JobId)
 end)
 
-eggTab:Dropdown("Select Area", {"Area1", "Area5", "Area10"}, function(t)
+eggTab:Dropdown("Select Area", getEggs(), function(t)
     getgenv().AreaEgg = t
 end)
 
