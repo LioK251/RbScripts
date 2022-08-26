@@ -133,9 +133,9 @@ mainTab:Toggle("Auto Collect", false, function(t)
     
     while getgenv().collect do task.wait()
         for i,v in pairs(game:GetService("Workspace")["__Cache"]:GetChildren()) do
-            if v.Name == "CollisionPart" and #v:GetChildren() ~= 0 then
+            if v.Name == "CollisionPart" then
                 if v:IsA("Part") then
-                    v.CFrame = game.Players.LocalPlayer.Character.PrimaryPart.CFrame
+                    v.Position = game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart").Position
                 end
             end
         end
