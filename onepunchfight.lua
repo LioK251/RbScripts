@@ -74,7 +74,7 @@ end
 mainTab:Dropdown("Select Area", getAreas(), function(t)
     getgenv().Area = t
     
-    game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart").CFrame = game:GetService("Workspace")["__TrainingZones"][getgenv().Area].CFrame
+    lp.Character:WaitForChild("HumanoidRootPart").CFrame = game:GetService("Workspace")["__TrainingZones"][getgenv().Area].CFrame
     
     local args = {
         [1] = "BuyWorld",
