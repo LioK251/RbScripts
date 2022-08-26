@@ -131,7 +131,7 @@ end)
 mainTab:Toggle("Auto Collect", false, function(t)
     getgenv().collect = t
     
-    while getgenv().collect do task.wait()
+    while getgenv().collect do task.wait(.3)
         for i,v in pairs(game:GetService("Workspace")["__Cache"]:GetChildren()) do
             if v.Name == "CollisionPart" then
                 if v:IsA("Part") then
