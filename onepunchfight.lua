@@ -131,9 +131,9 @@ end)
 mainTab:Toggle("Auto Collect", false, function(t)
     getgenv().collect = t
     
-    while getgenv().collect do task.wait(.3)
+    while getgenv().collect do task.wait()
         for i,v in pairs(game:GetService("Workspace")["__Cache"]:GetChildren()) do
-            if v.Name == "CollisionPart" then
+            if v.Name == "CollisionPart" and #v:GetChildren() ~= 0 then
                 if v:IsA("Part") then
                     v.CFrame = game.Players.LocalPlayer.Character.PrimaryPart.CFrame
                 end
