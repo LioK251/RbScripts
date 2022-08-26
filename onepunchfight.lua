@@ -23,6 +23,7 @@ getgenv().Area = nil
 getgenv().AreaEgg = nil
 getgenv().AreaEggTog = nil
 getgenv().click = nil
+getgenv().collect = nil
 getgenv().FarmDistance = 5
 
 local lp = game.Players.LocalPlayer
@@ -104,6 +105,20 @@ mainTab:Toggle("Auto Click", false, function(t)
         }
         
         game:GetService("ReplicatedStorage").Game.__Remotes.ClickEvent:FireServer(unpack(args))
+    end
+end)
+
+mainTab:Toggle("Auto Collect", false, function(t)
+    getgenv().collect = t
+    
+    while getgenv().collect do task.wait()
+        for i,v in pairs(game:GetService("Workspace")["__Cache"]:GetChildren()) do
+            if v.Name == "CollisionPart" then
+                if v:IsA("Part") then
+                    v.CFrame = game.Players.LocalPlayer.Character.PrimaryPart.CFrame
+                end
+            end
+        end
     end
 end)
 
