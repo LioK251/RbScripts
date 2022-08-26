@@ -105,7 +105,7 @@ mainTab:Toggle("Auto Farm", false, function(t)
 	               }
 	                    
 	               game:GetService("ReplicatedStorage").Game.__Remotes.AttackEvent:FireServer(unpack(args))
-                   game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(v:GetModelCFrame().Position + Vector3.new(0,-tonumber(getgenv().FarmDistance),0))
+                   lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(v:GetModelCFrame().Position + Vector3.new(0,-tonumber(getgenv().FarmDistance),0))
                 end
             end
         end
@@ -131,11 +131,16 @@ end)
 mainTab:Toggle("Auto Collect", false, function(t)
     getgenv().collect = t
     
-    while getgenv().collect do task.wait()
+    while getgenv().collect do task.wait(.2)
+        if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
+        
         for i,v in pairs(game:GetService("Workspace")["__Cache"]:GetChildren()) do
             if v.Name == "CollisionPart" then
-                if v:IsA("Part") then
-                    v.Position = game.Players.LocalPlayer.Character:WaitForChild("HumanoidRootPart").Position
+                if v:IsA("Part") and v.Position == Vector3.new(0, 1e+09, 0) then
+                    v.Size = Vector3.new(0.5,0.5,0.5)
+                else
+                    v.Size = Vector3.new(0.5,0.5,0.5)
+                    v.CFrame = lp.Character:WaitForChild("HumanoidRootPart").CFrame
                 end
             end
         end
