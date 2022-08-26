@@ -159,16 +159,13 @@ mainTab:Toggle("Kill Aura", false, function(t)
     end
 end)
 
-mainTab:Toggle("Farm Cubits", false, function(t)
-    getgenv().infCube = t
-
-    while getgenv().infCube do task.wait(.4)
-        local args = {
-            [1] = "CollectCubit",
-            [2] = math.random()
-        }
-
-        game:GetService("ReplicatedStorage").RemoteEvent:FireServer(unpack(args))
+mainTab:Button("Collect all Cubits", function(t)
+    for i,v in pairs(game:GetService("Workspace")["Client Cubits"]:GetChildren()) do
+        if v:IsA("MeshPart") then
+            if v:FindFirstChildWhichIsA("ProximityPrompt") then
+                fireproximityprompt(v:FindFirstChildWhichIsA("ProximityPrompt"), 1)
+            end
+        end
     end
 end)
 
