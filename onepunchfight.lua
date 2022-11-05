@@ -7815,7 +7815,7 @@ do
                         titleBar.BorderSizePixel = 1
                         titleBar.ClipsDescendants = true
                         titleBar.Name = '#title-bar'
-                        titleBar.Size = UDim2.new(1, 0, 0, 15)
+                        titleBar.Size = UDim2.new(1, 0, 0, 26)
                         titleBar.ZIndex = 3001
                         
                         titleBar.Parent = main 
@@ -7837,7 +7837,7 @@ do
                             fade.BorderMode = 'Inset'
                             fade.BorderSizePixel = 1
                             fade.Name = '#fade'
-                            fade.Size = UDim2.new(1, 4, 1, 4)
+                            fade.Size = UDim2.new(1, 4, 1, 2)
                             fade.Position = UDim2.fromOffset(-2, -2)
                             fade.Visible = false
                             fade.ZIndex = 3009
