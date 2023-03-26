@@ -76,7 +76,7 @@ function tpToFarm(target)
     if getgenv().farm_method == "Above/Below" then
         lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target:GetPivot().Position + Vector3.new(0,distance_from_mob,0))
     else
-        lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target:FindFirstChild("HumanoidRootPart").Position + target:FindFirstChild("HumanoidRootPart").CFrame.lookVector * -distance_from_mob, target:FindFirstChild("HumanoidRootPart").Position)
+        lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target:FindFirstChild("HumanoidRootPart").Position + target:FindFirstChild("HumanoidRootPart").CFrame.lookVector * distance_from_mob, target:FindFirstChild("HumanoidRootPart").Position)
     end
 end
 
