@@ -214,14 +214,16 @@ mainTab.Toggle({Text = "Hide Name", Callback = function(t)
     task.spawn(function(t)
         getgenv().hide_name = t
 
-        while hide_name do task.wait()
-            if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
+        while hide_name do task.wait(.2)
+            task.spawn(function()
+                if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
 
-            if (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName")) then
-                lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName"):Destroy()
-            elseif (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty")) then
-                lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty"):Destroy()
-            end
+                if (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName")) then
+                    lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName"):Destroy()
+                elseif (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty")) then
+                    lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty"):Destroy()
+                end
+            end)
         end
     end, t)
 end})
@@ -244,6 +246,8 @@ mainTab.Toggle({Text = "Kill Aura", Callback = function(t)
 
         while kill_aura do task.wait()
             task.spawn(function()
+                if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
+                
                 for i, v in pairs(workspace:FindFirstChild("Mobs"):GetChildren()) do
                     if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
                         local closest = (lp.Character:WaitForChild("HumanoidRootPart").Position - v:FindFirstChild("HumanoidRootPart").Position).magnitude
