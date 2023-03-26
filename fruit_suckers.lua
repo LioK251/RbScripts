@@ -1,4 +1,4 @@
-for i,v in pairs(getconnections(game.Players.LocalPlayer.Idled)) do 
+for i,v in pairs(getconnections(game.Players.LocalPlayer.Idled)) do
     v:Disable()
 end
 
@@ -9,9 +9,8 @@ local Material = loadstring(game:HttpGet("https://raw.githubusercontent.com/Kinl
             
 local UI = Material.Load({Title = "Fruit Warriors | Lazy Hub", Style = 1, SizeX = 500, SizeY = 350, Theme = "Dark"})
 
-local mainTab = UI.New({
-    Title = "Main Gui"
-})
+local mainTab = UI.New({Title = "Main Gui"})
+local miscTab = UI.New({Title = "Main Gui"})
 
 local lp = game.Players.LocalPlayer
 local char = lp.Character or lp.CharacterAdded:Wait()
@@ -47,6 +46,8 @@ function getTools()
     return tools
 end
 
+-- main tab
+
 mainTab.Label({Text = "Farm"})
 
 local mobs_drop = mainTab.Dropdown({Text = "Select Mob", Callback = function(t)
@@ -66,11 +67,13 @@ mainTab.Toggle({Text = "Auto TP Mob", Callback = function(t)
         while auto_tp do task.wait()
             if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
 
-            for i, v in pairs(workspace:FindFirstChild("Mobs"):GetChildren()) do
+            for i,v in pairs(workspace:FindFirstChild("Mobs"):GetChildren()) do
                 if v.Name == npc_name and v:FindFirstChild("HumanoidRootPart") and v:FindFirstChild("Humanoid") then
-                    if v.HumanoidRootPart and v.Humanoid.Health > 0 then
-                        char:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(v:GetPivot().Position + Vector3.new(0,distance_from_mob,0), v:GetPivot().Position)
-                    else
+                    repeat task.wait()
+                        lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(v:GetPivot().Position + Vector3.new(0,distance_from_mob,0), v:GetPivot().Position)
+                    until auto_tp == false or v:FindFirstChild("Humanoid").Health <= 0
+
+                    if v:FindFirstChild("Humanoid").Health <= 0 then
                         lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(1216.3323974609, 1712.4995117188, -7681.0712890625)
                     end
                 end
@@ -134,6 +137,30 @@ mainTab.Toggle({Text = "Kill Aura", Callback = function(t)
             end)
         end
     end, t)
+end})
+
+-- misc tab
+
+miscTab.Label({Text = "Collect"})
+
+miscTab.Button({Text = "Collect all Chests", function()
+    for i, v in pairs(game:GetService("Workspace").Chests:GetChildren()) do
+        if v:IsA("Model") and v:FindFirstChild("RootPart") then
+            lp.Character:WaitForChild("HumanoidRootPart").CFrame = v:GetPivot()
+            wait(.3)
+            fireproximityprompt(v:FindFirstChild("RootPart").PromptAttachment.ProximityPrompt, 7)
+        end
+    end
+end})
+
+miscTab.Button({Text = "Collect all Fruits", function()
+    for i, v in pairs(game:GetService("Workspace").Fruits:GetChildren()) do
+        if v:IsA("Model") then
+            lp.Character:WaitForChild("HumanoidRootPart").CFrame = v:GetPivot()
+            wait(.3)
+            fireproximityprompt(v:FindFirstChild(v.Name).PromptAttachment.ProximityPrompt, 7)
+        end
+    end
 end})
 
 game:GetService('RunService').Stepped:Connect(function()
