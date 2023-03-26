@@ -217,10 +217,10 @@ mainTab.Toggle({Text = "Hide Name", Callback = function(t)
         while hide_name do task.wait()
             if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
 
-            if (lp.Character:WaitForChild("Head").MobGUI.GUI.Info:FindFirstChild("NPCName")) then
-                lp.Character:WaitForChild("Head").MobGUI.GUI.Info:FindFirstChild("NPCName"):Destroy()
-            elseif (lp.Character:WaitForChild("Head").MobGUI.BountyUI:FindFirstChild("Bounty")) then
-                lp.Character:WaitForChild("Head").MobGUI.BountyUI:FindFirstChild("Bounty"):Destroy()
+            if (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName")) then
+                lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").GUI.Info:FindFirstChild("NPCName"):Destroy()
+            elseif (lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty")) then
+                lp.Character:WaitForChild("Head"):WaitForChild("MobGUI").BountyUI:FindFirstChild("Bounty"):Destroy()
             end
         end
     end, t)
