@@ -163,7 +163,7 @@ mainTab.Button({Text = "Refresh dropdown", Callback = function()
     mobs_drop:SetOptions(getQuests())
 end})
 
-mainTab.Toggle({Text = "Auto TP Mob", Callback = function(t)
+mainTab.Toggle({Text = "Auto Farm", Callback = function(t)
     task.spawn(function(t)
         getgenv().auto_tp = t
 
@@ -185,7 +185,7 @@ mainTab.Toggle({Text = "Auto TP Mob", Callback = function(t)
     end, t)
 end})
 
-local mobs_drop = mainTab.Dropdown({Text = "Farm Method", Callback = function(t)
+mainTab.Dropdown({Text = "Farm Method", Callback = function(t)
     getgenv().farm_method = t
 end, Options = {'Above/Below', 'Front/Behind'}})
 
@@ -247,7 +247,7 @@ mainTab.Toggle({Text = "Kill Aura", Callback = function(t)
         while kill_aura do task.wait()
             task.spawn(function()
                 if not char:IsDescendantOf(lp.Character.Parent) or not char:FindFirstChild("HumanoidRootPart") or not char then char = lp.Character wait(0.5) end
-                
+
                 for i, v in pairs(workspace:FindFirstChild("Mobs"):GetChildren()) do
                     if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
                         local closest = (lp.Character:WaitForChild("HumanoidRootPart").Position - v:FindFirstChild("HumanoidRootPart").Position).magnitude
