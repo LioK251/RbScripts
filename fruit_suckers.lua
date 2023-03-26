@@ -193,7 +193,7 @@ getgenv().farm_method = "Above/Below"
 
 mainTab.Slider({Text = "Distance from NPC", Callback = function(t)
     getgenv().distance_from_mob = t
-end, Min = -15, Max = 15, Def = -9})
+end, Min = -25, Max = 25, Def = -9})
 
 getgenv().distance_from_mob = -9
 
@@ -272,7 +272,7 @@ end})
 
 miscTab.Label({Text = "Collect"})
 
-miscTab.Button({Text = "Collect all Chests", function()
+miscTab.Button({Text = "Collect all Chests", Callback = function()
     for i, v in pairs(game:GetService("Workspace").Chests:GetChildren()) do
         if v:IsA("Model") and v:FindFirstChild("RootPart") then
             lp.Character:WaitForChild("HumanoidRootPart").CFrame = v:GetPivot()
@@ -282,7 +282,7 @@ miscTab.Button({Text = "Collect all Chests", function()
     end
 end})
 
-miscTab.Button({Text = "Collect all Fruits", function()
+miscTab.Button({Text = "Collect all Fruits", Callback = function()
     for i, v in pairs(game:GetService("Workspace").Fruits:GetChildren()) do
         if v:IsA("Model") then
             lp.Character:WaitForChild("HumanoidRootPart").CFrame = v:GetPivot()
@@ -292,7 +292,7 @@ miscTab.Button({Text = "Collect all Fruits", function()
     end
 end})
 
-miscTab.Button({Text = "Server Hop", function()
+miscTab.Button({Text = "Server Hop", Callback = function()
     Teleport()
 end})
 
