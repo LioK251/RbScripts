@@ -70,6 +70,16 @@ function get_mob(name)
     return mob
 end
 
+function tpToFarm(target)
+    if (not lp.Character and lp.Character:FindFirstChild("HumanoidRootPart")) then return end
+
+    if getgenv().farm_method == "Above/Below" then
+        lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target:GetPivot().Position + Vector3.new(0,distance_from_mob,0))
+    else
+        lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target:FindFirstChild("HumanoidRootPart").Position + target:FindFirstChild("HumanoidRootPart").CFrame.lookVector * -distance_from_mob, target:FindFirstChild("HumanoidRootPart").Position)
+    end
+end
+
 local PlaceID = game.PlaceId
 local AllIDs = {}
 local foundAnything = ""
@@ -164,7 +174,7 @@ mainTab.Toggle({Text = "Auto TP Mob", Callback = function(t)
 
             if (target_mob) then
                 repeat task.wait()
-                    lp.Character:WaitForChild("HumanoidRootPart").CFrame = CFrame.new(target_mob:GetPivot().Position + Vector3.new(0,distance_from_mob,0))
+                    tpToFarm(target_mob)
                 until auto_tp == false or target_mob:FindFirstChild("Humanoid").Health <= 0
 
                 if target_mob:FindFirstChild("Humanoid").Health <= 0 then
@@ -174,6 +184,12 @@ mainTab.Toggle({Text = "Auto TP Mob", Callback = function(t)
         end
     end, t)
 end})
+
+local mobs_drop = mainTab.Dropdown({Text = "Farm Method", Callback = function(t)
+    getgenv().farm_method = t
+end, Options = {'Above/Below', 'Front/Behind'}})
+
+getgenv().farm_method = "Above/Below"
 
 mainTab.Slider({Text = "Distance from NPC", Callback = function(t)
     getgenv().distance_from_mob = t
@@ -230,15 +246,15 @@ mainTab.Toggle({Text = "Kill Aura", Callback = function(t)
             task.spawn(function()
                 for i, v in pairs(workspace:FindFirstChild("Mobs"):GetChildren()) do
                     if v:IsA("Model") and v:FindFirstChild("HumanoidRootPart") then
-                        local closest = (char:WaitForChild("HumanoidRootPart").Position - v:FindFirstChild("HumanoidRootPart").Position).magnitude
+                        local closest = (lp.Character:WaitForChild("HumanoidRootPart").Position - v:FindFirstChild("HumanoidRootPart").Position).magnitude
                         
                         if closest < 50 then
-                            if char:FindFirstChild(tool_to_attack) then
+                            if lp.Character:FindFirstChild(tool_to_attack) then
                                 game:GetService("ReplicatedStorage").Remotes.Mouse1Combat:FireServer(tool_to_attack)
                                 task.wait()
                                 game:GetService("ReplicatedStorage").Remotes.M1sDamage:FireServer(tool_to_attack, v)
                             else
-                                lp.Backpack:FindFirstChild(tool_to_attack).Parent = char
+                                lp.Backpack:FindFirstChild(tool_to_attack).Parent = lp.Character
                             end
                         end
                     end
