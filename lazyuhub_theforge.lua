@@ -1,4 +1,3 @@
---Private Boronide™ Obfuscation, v69.420
 
 local h,W,n=nil,nil,nil([[
 
