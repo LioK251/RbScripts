@@ -2717,7 +2717,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 						Dropdown.Selected.Text = "None"
 					else
                         local abobaDropdownTable = table.concat(DropdownSettings.CurrentOption, ", ")
-						Dropdown.Selected.Text = "Selected: " .. abobaDropdownTable
+						Dropdown.Selected.Text = abobaDropdownTable
 					end
 				else
 					DropdownSettings.CurrentOption = {}
@@ -2836,7 +2836,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 									Dropdown.Selected.Text = "None"
 								else
                                     local abobaDropdownTable = table.concat(DropdownSettings.CurrentOption, ", ")
-                                    Dropdown.Selected.Text = "Selected: " .. abobaDropdownTable
+                                    Dropdown.Selected.Text = abobaDropdownTable
 								end
 							else
 								Dropdown.Selected.Text = DropdownSettings.CurrentOption[1]
@@ -2853,7 +2853,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 									Dropdown.Selected.Text = "None"
 								else
                                     local abobaDropdownTable = table.concat(DropdownSettings.CurrentOption, ", ")
-                                    Dropdown.Selected.Text = "Selected: " .. abobaDropdownTable
+                                    Dropdown.Selected.Text = abobaDropdownTable
 								end
 							else
 								Dropdown.Selected.Text = DropdownSettings.CurrentOption[1]
@@ -2949,7 +2949,7 @@ function RayfieldLibrary:CreateWindow(Settings)
 						Dropdown.Selected.Text = "None"
 					else
                         local abobaDropdownTable = table.concat(DropdownSettings.CurrentOption, ", ")
-                        Dropdown.Selected.Text = "Selected: " .. abobaDropdownTable
+                        Dropdown.Selected.Text = abobaDropdownTable
 					end
 				else
 					Dropdown.Selected.Text = DropdownSettings.CurrentOption[1]
