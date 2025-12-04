@@ -1679,8 +1679,8 @@ function RayfieldLibrary:CreateWindow(Settings)
 			while true do
 				task.wait(math.random(180, 600))
 				RayfieldLibrary:Notify({
-					Title = "Rayfield Interface",
-					Content = "Enjoying this UI library? Find it at sirius.menu/discord",
+					Title = "Lazy Hub",
+					Content = "Enjoying our script? Find it at discord.gg/U9v96pNDg4",
 					Duration = 7,
 					Image = 4370033185,
 				})
