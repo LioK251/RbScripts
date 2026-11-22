@@ -7820,7 +7820,7 @@ _G.StandOutParts.Incidents = function(ctx)
 	local refreshNative = ctx.incidentRefresh or refreshgc
 	local readMemory, nativeTables = ctx.incidentReadMemory or memory_read, {}
 	local writeMemory = ctx.incidentWriteMemory or memory_write
-	local session, drawingToken, drawingMemory, storageModule, jewelryModule, armModule, verityModule, tabletopModule
+	local session, drawingToken, drawingMemory, storageModule, jewelryModule, armModule, verityModule, tabletopModule, petyrMenu
 	local armRemote = game.ReplicatedStorage.Remotes.ArmWrestling
 	local tabletopRemote = game.ReplicatedStorage.Remotes.Tabletop
 	local scanFunctions = ctx.incidentFunctionScan or findgc
@@ -8068,8 +8068,10 @@ _G.StandOutParts.Incidents = function(ctx)
 		if not remote or remote.ClassName ~= "RemoteEvent" or not integer(remote.Address, 65536, 281474976710655) then return nil end
 		if not jewelryModule then
 			jewelryModule = {candidates = {}}
-			local ok, rows = pcall(scanFunctions, "IsOpen", {IsOpen = "function", Close = "function"})
-			if not ok or type(rows) ~= "table" or #rows > 256 then return nil end
+			local ok, rows
+			if ctx.incidentFunctionScan then ok, rows = pcall(ctx.incidentFunctionScan, "IsOpen", {IsOpen = "function", Close = "function"})
+			else ok, rows = pcall(scanNative, {"IsOpen", "Close"}) end
+			if not ok or type(rows) ~= "table" or #rows > 4096 then return nil end
 			local opens, closes = {}, {}
 			for _, row in ipairs(rows) do
 				if (row.key == "IsOpen" or row.key == "Close") and integer(row.addr, 65536, 281474976710655)
@@ -8186,6 +8188,39 @@ _G.StandOutParts.Incidents = function(ctx)
 		local pointer = memory("uintptr", value)
 		local snapshot, kinds = nativeMap(pointer)
 		return snapshot, kinds, pointer
+	end
+	function controller.PetyrMenuOpen(gui)
+		local bounty = child(child(player, "PlayerGui"), "Bounty")
+		local current = child(bounty, "BountySelect")
+		if not gui or not gui.Parent or not current or gui.Address ~= current.Address then return nil end
+		local function capture(pointer)
+			local refs = closureRefs(pointer)
+			return refs and #refs == 4 and refs[1].tag == 15 and instancePointer(refs[4].field) == gui.Address and refs[1].pointer or nil
+		end
+		if not petyrMenu or petyrMenu.gui ~= gui.Address then
+			petyrMenu = {gui = gui.Address, candidates = {}}
+			local ok, rows = pcall(scanFunctions, "Back", {Back = "function", CloseMenu = "function"})
+			if not ok or type(rows) ~= "table" or #rows > 1024 then return nil end
+			local seen = {}
+			for _, row in ipairs(rows) do
+				if (row.key == "Back" or row.key == "CloseMenu") and integer(row.addr, 65536, 281474976710655) and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					if not seen[pointer] then
+						seen[pointer] = true
+						local cell = capture(pointer)
+						if cell then petyrMenu.candidates[#petyrMenu.candidates + 1] = {pointer = pointer, cell = cell} end
+					end
+				end
+			end
+		end
+		if #petyrMenu.candidates ~= 1 then return nil end
+		local candidate = petyrMenu.candidates[1]
+		if capture(candidate.pointer) ~= candidate.cell or memory("byte", candidate.cell + 1) ~= 15 and memory("byte", candidate.cell) ~= 15 then return nil end
+		local field = memory("uintptr", candidate.cell + 8)
+		if not integer(field, 65536, 281474976710655) or memory("int", field + 12) ~= 1 then return nil end
+		local value = memory("int", field)
+		if value == 0 or value == 1 then return value == 1 end
+		return nil
 	end
 	function controller.GoFishStep(state, cached)
 		local index = type(state.active) == "string" and tonumber(state.active:match("^%d+%-(%d+)"))
@@ -8393,8 +8428,9 @@ _G.StandOutParts.Incidents = function(ctx)
 			decline = progress.IncidentPhase == "report" and "one moment" or "i'll be back"
 		else return false end
 		local choices, count = dialogueChoices(cached.gui, npc)
-		if not choices or not choices[accept] or not choices[decline]
-			or count ~= 2 and not (count == 3 and npc == "Meryl Mei Qi" and choices["about driving practice"]) then return false end
+		if not choices or not choices[accept] or not choices[decline] then return false end
+		local extras = npc == "Meryl Mei Qi" and ((choices["about driving practice"] and 1 or 0) + (choices["about fashion lessons"] and 1 or 0)) or 0
+		if count ~= 2 + extras then return false end
 		local owned = false
 		for _, scene in ipairs(scenes or {}) do
 			local id = ctx.attr(scene, "BountyId") or ctx.attr(scene, "Bounty")
@@ -9685,15 +9721,16 @@ _G.StandOutParts.Bounties = function(ctx)
 
 	local function scanWorld()
 		prompts, fighters, scenes = {}, {}, {}
-		state.targetObject = resolveTargetPath(state.targetPath)
-		local namedTarget, namedAmbiguous
 		cached.petyr = child(child(world, "NPCs"), "Petyr")
 		cached.petyrPart = partOf(cached.petyr)
 		cached.petyrPrompt = child(cached.petyr, "ProximityPrompt") or child(cached.petyr, "ClickDetector")
 		state.lastWorld = ctx.now()
-		if not state.active then
+		if not state.active or state.claim then
+			state.targetObject = nil
 			return
 		end
+		state.targetObject = resolveTargetPath(state.targetPath)
+		local namedTarget, namedAmbiguous
 		local seen, fighterSeen, sceneSeen = {}, {}, {}
 		local function directlyOwned(model)
 			local id = ctx.attr(model, "BountyId") or ctx.attr(model, "Bounty")
@@ -10059,6 +10096,18 @@ _G.StandOutParts.Bounties = function(ctx)
 		return true
 	end
 
+	local function closePetyrMenu()
+		local open = incidents and incidents.PetyrMenuOpen and incidents.PetyrMenuOpen(cached.menu)
+		if open == false or open == nil and not state.petyrMenuOwned then state.petyrMenuOwned = nil; return true end
+		local now = ctx.now()
+		busy = true
+		if now < (state.petyrCloseAt or 0) then return false end
+		if ctx.click(child(cached.menu, "EXIT")) then
+			state.petyrCloseAt, state.nextAction = now + 0.2, math.max(state.nextAction, now + 0.2)
+			if open == nil then state.petyrMenuOwned = nil; return true end
+		end
+		return false
+	end
 	local function claimAtPetyr()
 		local rotation, index, tier = parseId(state.active)
 		if not rotation then return false end
@@ -10083,7 +10132,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		end
 		if state.menuStage == "claiming" then
 			if now > state.menuUntil then
-				state.menuStage, state.blockedUntil = nil, now + 8
+				state.menuStage, state.blockedUntil = nil, now + 1
 				say("Petyr needs reward claim confirmation")
 			else
 				busy = true
@@ -10092,7 +10141,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			state.nextAction = now + 0.1
 			return true
 		end
-		if now < state.blockedUntil or not atPetyr() then return true end
+		if now < state.blockedUntil or not closePetyrMenu() or not atPetyr() then return true end
 		local sent, result = pcall(function()
 			return game.ReplicatedStorage.Remotes.Bounty:FireServer("ClaimAtPetyr", state.active)
 		end)
@@ -10101,7 +10150,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			say("Petyr's reward request needs its native remote")
 			return true
 		end
-		state.menuStage, state.menuUntil, state.nextAction = "claiming", now + 8, now + 0.1
+		state.menuStage, state.menuUntil, state.nextAction = "claiming", now + 2, now + 0.1
 		busy = true
 		say("Waiting for Petyr's reward receipt")
 		return true
@@ -10119,6 +10168,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			end
 			if ctx.interact(cached.petyrPrompt) ~= "triggered" then return end
 			state.interactionOwned = true
+			state.petyrMenuOwned = true
 			state.tierClicks = 0
 			state.menuStage, state.menuUntil, state.nextAction = "opening", now + 12, now + 0.1
 			busy = true
@@ -10209,7 +10259,8 @@ _G.StandOutParts.Bounties = function(ctx)
 				say("Waiting for the native bounty cards")
 				return
 			end
-			ctx.click(child(menu, "EXIT"))
+			state.petyrMenuOwned = true
+			if not closePetyrMenu() then return end
 			state.menuStage, busy, state.allDone = nil, false, state.rotation
 			say(anyBlocked and "All offered bounties blocked or completed; waiting for refresh" or "All offered bounties completed; waiting for refresh")
 			return
@@ -10554,6 +10605,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			return true
 		end
 		state.interactionOwned = false
+		if state.active and not state.claim and not closePetyrMenu() then return true end
 		if ctx.now() < state.nextAction then
 			busy = state.menuStage ~= nil or state.karaokeSession ~= nil or state.teaOwner ~= nil or state.inputLock
 			return busy
@@ -12242,7 +12294,8 @@ local function startStandOut()
 		if not p or not size then
 			return false
 		end
-		local x, y = p.X + (size.X > 1 and size.X / 2 or 12), p.Y + (size.Y > 1 and size.Y / 2 or 10)
+		local petyrExit = gui.Name == "EXIT" and gui.Parent and gui.Parent.Name == "BountySelect"
+		local x, y = p.X + (size.X > 1 and size.X / 2 or petyrExit and 34 or 12), p.Y + (size.Y > 1 and size.Y / 2 or 10)
 		if x < 0 or y < 0 or x > viewport.X or y > viewport.Y then
 			return false
 		end
@@ -12984,7 +13037,6 @@ local function startStandOut()
 		})
 	end
 	toggle(farmGroup, "AutoBounties", "Auto Petyr bounties")
-	farmGroup:AddLabel("this feature is still W.I.P and very buggy", true)
 	dropdown(farmGroup, "BountyTier", "Bounty tier", { "Highest unlocked", "Tier 1" }, "Highest unlocked")
 	local bountyValues = {}
 	for index = 1, 14 do
