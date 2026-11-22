@@ -1455,7 +1455,8 @@ if Instance == nil then
 					if type(notify) == "function" then
 						pcall(notify, "lazyhub", "Drawing UI failed: " .. self.LastRenderError, 8)
 					end
-					task.defer(function()
+					task.spawn(function()
+						task.wait()
 						self:Unload()
 					end)
 				elseif fullWindow then
@@ -6087,9 +6088,8 @@ Library:GiveSignal(Players.PlayerRemoving:Connect(OnPlayerChange))
 
 getgenv().Library = Library
 return Library
-
 end
-do
+
 _G.StandOutParts = _G.StandOutParts or {}
 _G.StandOutParts.Water = function()
 	local rings = {
@@ -6703,8 +6703,6 @@ _G.StandOutParts.Water = function()
 	return {Contains = contains, IsLand = isLand}
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 _G.StandOutParts.PhoneTargetReader = function(player: any, nowFn: any): any
@@ -7229,7 +7227,7 @@ _G.StandOutParts.Resources = function(ctx: any): any
 		end
 		if inputBlocked() or string.lower(uiState(job.gui).status or ""):find("time stopped", 1, true) then
 			ctx.releaseAll()
-			job.dragPhase = nil
+			job.dragPhase, job.goalAt = nil, nil
 			job.deadline = math.min(math.max(job.deadline, now() + 15), job.started + 180)
 			report("Harvest", "Replant paused")
 			return "busy"
@@ -7318,7 +7316,11 @@ _G.StandOutParts.Resources = function(ctx: any): any
 		elseif lower:find("plant ", 1, true) or lower:find("drag the seed", 1, true) then
 			job.dragParts = job.dragParts or seedScene()
 			local projection = job.projection
-			if not projection or now() - projection.at > 0.6 then report("Harvest", "Waiting for visible planting targets"); return "busy" end
+			if not projection or now() - projection.at > 0.6 then
+				if job.dragPhase == "carrying" then ctx.release(1) end
+				job.dragPhase, job.goalAt = nil, nil
+				report("Harvest", "Waiting for visible planting targets"); return "busy"
+			end
 			if job.dragPhase == "dropped" then
 				if now() < job.dragRetry then return "busy" end
 				if (job.dragAttempts or 0) >= 3 then return finishReplant("seed placement was not confirmed") end
@@ -7326,14 +7328,29 @@ _G.StandOutParts.Resources = function(ctx: any): any
 			end
 			if not job.dragPhase then
 				if ctx.mouseMove(projection.source.X, projection.source.Y, nil, true) ~= false and ctx.hold(1) ~= false then
-					job.dragPhase, job.dragAt, job.dragAttempts, job.dragStart = "carrying", now(), (job.dragAttempts or 0) + 1, job.dragParts.source.Position
+					job.dragPhase, job.dragAt, job.dragAttempts, job.dragStart = "carrying", now(), (job.dragAttempts or 0) + 1, projection.source
+					job.dragGoal, job.dragProgress, job.dragPoint, job.goalAt = projection.goal, 0, nil, nil
 				end
 			elseif job.dragPhase == "carrying" then
-				ctx.hold(1)
-				local elapsed, position = now() - job.dragAt, job.dragParts.source.Position
-				if elapsed >= 0.04 then job.goalReady = ctx.mouseMove(projection.goal.X, projection.goal.Y, nil, true) ~= false end
-				local moved = finitePosition(position) and finitePosition(job.dragStart) and (position - job.dragStart).Magnitude >= 0.6
-				if elapsed >= 0.2 and job.goalReady and (elapsed >= 0.3 or moved) then ctx.release(1); job.dragPhase, job.dragRetry = "dropped", now() + 1.2 end
+				if ctx.hold(1) == false then ctx.release(1); job.dragPhase, job.goalAt = nil, nil; return "busy" end
+				if math.abs(projection.goal.X - job.dragGoal.X) > 2 or math.abs(projection.goal.Y - job.dragGoal.Y) > 2 then
+					job.dragAt, job.dragStart, job.dragGoal, job.dragProgress, job.dragPoint, job.goalAt = now(), projection.source, projection.goal, 0, nil, nil
+				end
+				local elapsed = now() - job.dragAt
+				if elapsed >= 0.1 then
+					if not job.dragPoint then
+						local progress = math.min(1, job.dragProgress + 0.25, (elapsed - 0.1) / 0.55)
+						job.dragPoint = { X = job.dragStart.X + (job.dragGoal.X - job.dragStart.X) * progress,
+							Y = job.dragStart.Y + (job.dragGoal.Y - job.dragStart.Y) * progress, progress = progress }
+					end
+					job.goalReady = ctx.mouseMove(job.dragPoint.X, job.dragPoint.Y, nil, true) ~= false
+					if job.goalReady then job.dragProgress, job.dragPoint = job.dragPoint.progress, nil end
+					local position, soil = job.dragParts.source.Position, job.dragParts.dirt.Position
+					local nearSoil = finitePosition(position) and finitePosition(soil)
+						and (position.X - soil.X) ^ 2 + (position.Z - soil.Z) ^ 2 <= 0.55 ^ 2
+					if job.dragProgress == 1 and job.goalReady and nearSoil then job.goalAt = job.goalAt or now() else job.goalAt = nil end
+					if job.goalAt and now() - job.goalAt >= 0.2 then ctx.release(1); job.dragPhase, job.dragRetry = "dropped", now() + 1.2 end
+				end
 			end
 			report("Harvest", "Placing selected seed over the soil")
 		else report("Harvest", "Waiting for native planting progress") end
@@ -7361,17 +7378,17 @@ _G.StandOutParts.Resources = function(ctx: any): any
 		return job ~= nil and (not kind or job.kind == kind) and job.phase ~= "moving"
 	end
 
-	function resource.Ready(kind: string): boolean
+	function resource.Ready(kind: string, candidate: boolean?): boolean
 		resource.Poll()
 		if job and job.phase == "canceling" then return job.kind == kind end
 		if not resource.Available[kind] or not ctx.getSetting(settingKeys[kind]) then
 			resource.Stop(kind)
 			return false
 		end
-		if job then
+		if job and (job.kind == kind or not candidate) then
 			return job.kind == kind
 		end
-		if kind == "Harvest" and recoverPlant() then return true end
+		if not job and kind == "Harvest" and recoverPlant() then return true end
 		if
 			inputBlocked()
 			or ctx.attr(ctx.player, "GrowingInputOwner") ~= nil
@@ -7677,11 +7694,10 @@ _G.StandOutParts.Resources = function(ctx: any): any
 	return resource
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 local components = { "Heart", "Star", "Moon", "Clasp" }
+local fishSymbols = { "Jelly", "Fish", "Beyond", "Humu", "Shark", "Frog", "Seal", "Bass" }
 
 local function finite(value)
 	return type(value) == "number" and value == value and math.abs(value) < math.huge
@@ -7714,23 +7730,62 @@ local function sampleStroke(stroke, count)
 	return result
 end
 
-local function cursorAngle(track, cursor)
+local function cursorAngle(track, cursor, geometry)
 	if not track or not cursor or not track.Parent or not cursor.Parent then return nil end
 	local p, size, cp, cs = track.AbsolutePosition, track.AbsoluteSize, cursor.AbsolutePosition, cursor.AbsoluteSize
-	if not p or not size or not cp or not cs or size.X <= 10 or size.Y <= 10 then return nil end
-	local x, y = (cp.X + cs.X / 2 - p.X) / size.X, (cp.Y + cs.Y / 2 - p.Y) / size.Y
-	if not finite(x) or not finite(y) or x < 0 or x > 1 or y < 0 or y > 1 then return nil end
+	if not p or not cp or not finite(p.X) or not finite(p.Y) or not finite(cp.X) or not finite(cp.Y) then return nil end
+	local width, height = size and size.X or 0, size and size.Y or 0
+	local cx, cy, reset = cs and cs.X or 0, cs and cs.Y or 0, false
+	local x, y
+	if finite(width) and finite(height) and width > 10 and height > 10 and finite(cx) and finite(cy) and cx > 0 and cy > 0 then
+		if geometry and geometry.fallback then geometry.fallback, reset = false, true end
+		x, y = (cp.X + cx / 2 - p.X) / width, (cp.Y + cy / 2 - p.Y) / height
+	else
+		if not geometry then return nil end
+		if not finite(width) or not finite(height) or width <= 10 or height <= 10 then
+			local panel = track.Parent.AbsolutePosition
+			if not panel or not finite(panel.X) or not finite(panel.Y) then return nil end
+			width, height = (p.X - panel.X) * 0.64 / 0.18, (p.Y - panel.Y) * 0.64 / 0.15
+		end
+		if not finite(width) or not finite(height) or width <= 10 or height <= 10 then return nil end
+		if not geometry.fallback or geometry.track ~= track.Address or geometry.cursor ~= cursor.Address
+			or geometry.x ~= p.X or geometry.y ~= p.Y or geometry.width ~= width or geometry.height ~= height then
+			geometry.fallback, geometry.track, geometry.cursor = true, track.Address, cursor.Address
+			geometry.x, geometry.y, geometry.width, geometry.height = p.X, p.Y, width, height
+			geometry.minX, geometry.maxX, geometry.minY, geometry.maxY, geometry.ready = cp.X, cp.X, cp.Y, cp.Y, false
+			reset = true
+		end
+		if not geometry.ready and geometry.resting then
+			-- The native countdown fixes the cursor at the middle of the top edge.
+			geometry.offsetX, geometry.offsetY, geometry.ready = p.X + width * 0.5 - cp.X, p.Y + height * 0.05 - cp.Y, true
+		end
+		if not geometry.ready then
+			geometry.minX, geometry.maxX = math.min(geometry.minX, cp.X), math.max(geometry.maxX, cp.X)
+			geometry.minY, geometry.maxY = math.min(geometry.minY, cp.Y), math.max(geometry.maxY, cp.Y)
+			local spanX, spanY = geometry.maxX - geometry.minX, geometry.maxY - geometry.minY
+			local toleranceX, toleranceY = math.max(0.01, width * 0.001), math.max(0.01, height * 0.001)
+			if spanX > width * 0.9 + toleranceX or spanY > height * 0.9 + toleranceY then
+				geometry.minX, geometry.maxX, geometry.minY, geometry.maxY = cp.X, cp.X, cp.Y, cp.Y
+				reset = true
+			elseif math.abs(spanX - width * 0.9) <= toleranceX and math.abs(spanY - height * 0.9) <= toleranceY then
+				geometry.offsetX, geometry.offsetY, geometry.ready = p.X + width * 0.05 - geometry.minX, p.Y + height * 0.05 - geometry.minY, true
+			end
+		end
+		if not geometry.ready then return nil, reset end
+		x, y = (cp.X + geometry.offsetX - p.X) / width, (cp.Y + geometry.offsetY - p.Y) / height
+	end
+	if not finite(x) or not finite(y) or x < 0 or x > 1 or y < 0 or y > 1 then return nil, reset end
 	local side, nearest = 1, math.abs(y - 0.05)
-	for index, distance in ipairs({ math.abs(x - 0.95), math.abs(y - 0.95), math.abs(x - 0.05) }) do
+	for index, distance in ipairs({math.abs(x - 0.95), math.abs(y - 0.95), math.abs(x - 0.05)}) do
 		if distance < nearest then side, nearest = index + 1, distance end
 	end
-	if nearest > 0.12 then return nil end
+	if nearest > 0.12 then return nil, reset end
 	local turn
 	if side == 1 then turn = (x - 0.05) / 0.9
 	elseif side == 2 then turn = 1 + (y - 0.05) / 0.9
 	elseif side == 3 then turn = 2 + (0.95 - x) / 0.9
 	else turn = 3 + (0.95 - y) / 0.9 end
-	return ((turn - 0.5) % 4) * 90
+	return ((turn - 0.5) % 4) * 90, reset
 end
 
 local function choiceText(button)
@@ -7743,6 +7798,8 @@ local function investigativeChoice(buttons)
 	local accepted = {
 		["where is the missing package"] = true,
 		["where's the missing package"] = true,
+		["where is hubert's missing package"] = true,
+		["how did you know where hubert's package was"] = true,
 	}
 	local selected
 	for index = 1, 2 do
@@ -7762,7 +7819,10 @@ _G.StandOutParts.Incidents = function(ctx)
 	local readNative, scanNative = ctx.incidentReadTable or readtbl, ctx.incidentScan or getgc
 	local refreshNative = ctx.incidentRefresh or refreshgc
 	local readMemory, nativeTables = ctx.incidentReadMemory or memory_read, {}
-	local session, drawingToken, drawingMemory
+	local session, drawingToken, drawingMemory, storageModule, jewelryModule, armModule, verityModule, tabletopModule
+	local armRemote = game.ReplicatedStorage.Remotes.ArmWrestling
+	local tabletopRemote = game.ReplicatedStorage.Remotes.Tabletop
+	local scanFunctions = ctx.incidentFunctionScan or findgc
 	local function say(text) ctx.setStatus("Bounties", text) end
 	local function child(parent, name) return parent and parent:FindFirstChild(name) end
 	local function stringValue(value)
@@ -7783,11 +7843,18 @@ _G.StandOutParts.Incidents = function(ctx)
 		local ok, result = pcall(readMemory, kind, pointer)
 		return ok and result or nil
 	end
+	local function tableExponent(pointer)
+		local current = memory("byte", pointer + 1) == 6
+		if not current and memory("byte", pointer) ~= 6 then return nil end
+		local exponent = memory("byte", pointer + (current and 4 or 5))
+		if not integer(exponent, 0, 7) or current and memory("byte", pointer + 7) ~= math.min(2 ^ exponent - 1, 255) then return nil end
+		return exponent
+	end
 	local function nativePointer(row)
 		if integer(row.addr, 65536, 281474976710655) then
 			if memory("int", row.addr + 12) ~= 6 then return nil end
 			local pointer = memory("uintptr", row.addr)
-			if integer(pointer, 65536, 281474976710655) and memory("byte", pointer) == 6 then
+			if integer(pointer, 65536, 281474976710655) and tableExponent(pointer) ~= nil then
 				nativeTables[pointer] = true
 				return pointer
 			end
@@ -7795,12 +7862,21 @@ _G.StandOutParts.Incidents = function(ctx)
 		end
 		return row.type == "table" and address(row.value) or nil
 	end
+	local function instancePointer(field)
+		if not integer(field, 65536, 281474976710655) or memory("int", field + 12) ~= 8 then return nil end
+		local pointer = memory("uintptr", field)
+		if not integer(pointer, 65536, 281474976710655)
+			or memory("byte", pointer + 1) ~= 8 and memory("byte", pointer) ~= 8
+			or memory("int", pointer + 4) ~= 16 then return nil end
+		local instance = memory("uintptr", pointer + 16)
+		return integer(instance, 65536, 281474976710655) and instance or nil
+	end
 	local function readMap(pointer, slots)
 		if not integer(pointer, 65536, 281474976710655) then return nil end
 		local array, arrayCount, nodes = nil, 0, pointer
 		if nativeTables[pointer] then
-			if memory("byte", pointer) ~= 6 then return nil end
-			local exponent = memory("byte", pointer + 5)
+			local exponent = tableExponent(pointer)
+			if exponent == nil then return nil end
 			arrayCount, array = memory("int", pointer + 8), memory("uintptr", pointer + 32)
 			nodes = memory("uintptr", pointer + 40)
 			if not integer(exponent, 0, 7) or not integer(arrayCount, 0, 128)
@@ -7814,8 +7890,9 @@ _G.StandOutParts.Incidents = function(ctx)
 		for _, row in ipairs(rows) do
 			local key = row.key
 			if type(key) == "string" or integer(key, 1, 128) then
-				local tablePointer = nativePointer(row)
+				local tablePointer, instance = nativePointer(row), instancePointer(row.addr)
 				if tablePointer then result[key], kinds[key] = tablePointer, "table"
+				elseif instance then result[key], kinds[key] = instance, "Instance"
 				elseif row.type == "string" then
 					local decoded = stringValue(row.value)
 					result[key] = decoded
@@ -7823,8 +7900,14 @@ _G.StandOutParts.Incidents = function(ctx)
 					local number = tonumber(row.value)
 					if finite(number) then result[key] = number end
 				elseif row.type == "boolean" then
-					if row.value == true or row.value == "true" then result[key] = true
-					elseif row.value == false or row.value == "false" then result[key] = false end
+					if row.addr ~= nil then
+						if not integer(row.addr, 65536, 281474976710655) or memory("int", row.addr + 12) ~= 1 then return nil end
+						local boolean = memory("int", row.addr)
+						if boolean ~= 0 and boolean ~= 1 then return nil end
+						result[key] = boolean == 1
+					elseif row.value == true or row.value == "true" then result[key] = true
+					elseif row.value == false or row.value == "false" then result[key] = false
+					else return nil end
 				elseif row.type == "table" then result[key] = nativePointer(row) end
 				kinds[key] = kinds[key] or row.type
 			end
@@ -7837,16 +7920,19 @@ _G.StandOutParts.Incidents = function(ctx)
 				if finite(number) then result[index], kinds[index] = number, "number" end
 			elseif tag == 1 then
 				local boolean = memory("int", field)
-				if boolean ~= nil then result[index], kinds[index] = boolean ~= 0, "boolean" end
+				if boolean ~= 0 and boolean ~= 1 then return nil end
+				result[index], kinds[index] = boolean == 1, "boolean"
 			elseif tag == 6 then
 				local pointerValue = memory("uintptr", field)
-				if integer(pointerValue, 65536, 281474976710655) and memory("byte", pointerValue) == 6 then
+				if integer(pointerValue, 65536, 281474976710655) and tableExponent(pointerValue) ~= nil then
 					nativeTables[pointerValue] = true
 					result[index], kinds[index] = pointerValue, "table"
 				end
 			elseif tag == 8 then
 				local pointerValue = memory("uintptr", field)
-				if memory("byte", pointerValue) == 8 and memory("byte", pointerValue + 3) == 9 and memory("int", pointerValue + 4) == 8 then
+				local current = memory("byte", pointer + 1) == 6
+				if integer(pointerValue, 65536, 281474976710655) and memory("byte", pointerValue + (current and 1 or 0)) == 8
+					and memory("byte", pointerValue + 3) == 9 and memory("int", pointerValue + 4) == 8 then
 					local x, y = memory("float", pointerValue + 16), memory("float", pointerValue + 20)
 					if finite(x) and finite(y) and x >= 0 and x <= 1 and y >= 0 and y <= 1 then result[index], kinds[index] = Vector2.new(x, y), "Vector2" end
 				end
@@ -7856,6 +7942,346 @@ _G.StandOutParts.Incidents = function(ctx)
 	end
 	local function typed(map, kinds, field, kind)
 		return map ~= nil and kinds ~= nil and kinds[field] == kind and map[field] ~= nil
+	end
+	local function nativeMap(pointer)
+		if not integer(pointer, 65536, 281474976710655) or tableExponent(pointer) == nil then return nil end
+		nativeTables[pointer] = true
+		return readMap(pointer, 128)
+	end
+	local function closureRefs(pointer)
+		if not integer(pointer, 65536, 281474976710655) then return nil end
+		local current = memory("byte", pointer + 1) == 7
+		if not current and memory("byte", pointer) ~= 7 then return nil end
+		if memory("byte", pointer + (current and 5 or 3)) ~= 0 then return nil end
+		local count = memory("byte", pointer + 4)
+		if not integer(count, 1, 48) then return nil end
+		local refs = {}
+		for index = 0, count - 1 do
+			local field = pointer + 32 + index * 16
+			refs[index + 1] = {tag = memory("int", field + 12), pointer = memory("uintptr", field), field = field}
+		end
+		return refs
+	end
+	local function tabletopModulePointer(refs)
+		if not refs then return nil end
+		local found, hasRemote
+		for _, ref in ipairs(refs) do
+			if instancePointer(ref.field) == tabletopRemote.Address then hasRemote = true end
+			if ref.tag == 6 then
+				local _, kinds = nativeMap(ref.pointer)
+				if kinds and kinds.Start == "function" and kinds.Refresh == "function" and kinds.Close == "function" then
+					if found and found ~= ref.pointer then return nil end
+					found = ref.pointer
+				end
+			end
+		end
+		return hasRemote and found or nil
+	end
+	local function tabletopSnapshot()
+		if not tabletopRemote or tabletopRemote.ClassName ~= "RemoteEvent" or not integer(tabletopRemote.Address, 65536, 281474976710655) then return nil end
+		if not tabletopModule then
+			tabletopModule = {candidates = {}}
+			local ok, rows
+			if ctx.incidentFunctionScan then
+				ok, rows = pcall(scanFunctions, "Refresh", {Start = "function", Refresh = "function", Close = "function"})
+			else
+				ok, rows = pcall(scanNative, "Start")
+				if ok and type(rows) == "table" then
+					local starts = {}
+					for _, row in ipairs(rows) do
+						if row.key == "Start" and row.type == "function" then starts[#starts + 1] = row end
+					end
+					rows = starts
+				end
+			end
+			if not ok or type(rows) ~= "table" or #rows > 256 then return nil end
+			local seen = {}
+			for _, row in ipairs(rows) do
+				if row.key == "Start" and integer(row.addr, 65536, 281474976710655) and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					local refs = closureRefs(pointer)
+					local module = tabletopModulePointer(refs)
+					if module and not seen[pointer] then
+						seen[pointer] = true
+						tabletopModule.candidates[#tabletopModule.candidates + 1] = {start = pointer, module = module}
+					end
+				end
+			end
+		end
+		if #tabletopModule.candidates ~= 1 then return nil end
+		local candidate = tabletopModule.candidates[1]
+		local refs = closureRefs(candidate.start)
+		if tabletopModulePointer(refs) ~= candidate.module then return nil end
+		local module, kinds = nativeMap(candidate.module)
+		if not typed(module, kinds, "Session", "table") then return nil end
+		return nativeMap(module.Session)
+	end
+	local function armSnapshot()
+		if not armRemote or armRemote.ClassName ~= "RemoteEvent" or not integer(armRemote.Address, 65536, 281474976710655) then return nil end
+		if not armModule then
+			armModule = {candidates = {}}
+			local ok, rows
+			if ctx.incidentFunctionScan then
+				ok, rows = pcall(ctx.incidentFunctionScan, "GetSession", {GetSession = "function", Stop = "function"})
+			else
+				ok, rows = pcall(getgc, {"GetSession", "Stop"})
+			end
+			if not ok or type(rows) ~= "table" or #rows > 4096 then return nil end
+			local gets, stops = {}, {}
+			for _, row in ipairs(rows) do
+				if (row.key == "GetSession" or row.key == "Stop") and integer(row.addr, 65536, 281474976710655)
+					and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					local refs = closureRefs(pointer)
+					if refs then
+						if row.key == "GetSession" and #refs == 1 and refs[1].tag == 15 then gets[pointer] = refs[1].pointer
+						elseif row.key == "Stop" and #refs == 6 and refs[1].tag == 15 and instancePointer(refs[2].field) == armRemote.Address then
+							stops[pointer] = refs[1].pointer
+						end
+					end
+				end
+			end
+			for get, cell in pairs(gets) do
+				for stop, other in pairs(stops) do
+					if cell == other then armModule.candidates[#armModule.candidates + 1] = {get = get, stop = stop, cell = cell} end
+				end
+			end
+		end
+		if #armModule.candidates ~= 1 then return nil end
+		local candidate = armModule.candidates[1]
+		local gets, stops = closureRefs(candidate.get), closureRefs(candidate.stop)
+		if not gets or #gets ~= 1 or not stops or #stops ~= 6 or gets[1].tag ~= 15 or stops[1].tag ~= 15
+			or gets[1].pointer ~= candidate.cell or stops[1].pointer ~= candidate.cell
+			or instancePointer(stops[2].field) ~= armRemote.Address then return nil end
+		local cell = candidate.cell
+		if memory("byte", cell + 1) ~= 15 and memory("byte", cell) ~= 15 then return nil end
+		local value = memory("uintptr", cell + 8)
+		if not integer(value, 65536, 281474976710655) or memory("int", value + 12) ~= 6 then return nil end
+		local pointer = memory("uintptr", value)
+		local snapshot, kinds = nativeMap(pointer)
+		return snapshot, kinds, pointer
+	end
+	local function jewelrySnapshot()
+		if not remote or remote.ClassName ~= "RemoteEvent" or not integer(remote.Address, 65536, 281474976710655) then return nil end
+		if not jewelryModule then
+			jewelryModule = {candidates = {}}
+			local ok, rows = pcall(scanFunctions, "IsOpen", {IsOpen = "function", Close = "function"})
+			if not ok or type(rows) ~= "table" or #rows > 256 then return nil end
+			local opens, closes = {}, {}
+			for _, row in ipairs(rows) do
+				if (row.key == "IsOpen" or row.key == "Close") and integer(row.addr, 65536, 281474976710655)
+					and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					local refs = closureRefs(pointer)
+					if refs then
+						if row.key == "IsOpen" and #refs == 1 and refs[1].tag == 15 then opens[pointer] = refs[1].pointer
+						elseif row.key == "Close" and #refs == 6 and refs[3].tag == 15 and instancePointer(refs[5].field) == remote.Address then
+							closes[pointer] = refs[3].pointer
+						end
+					end
+				end
+			end
+			for open, cell in pairs(opens) do
+				for close, other in pairs(closes) do
+					if cell == other then jewelryModule.candidates[#jewelryModule.candidates + 1] = {open = open, close = close, cell = cell} end
+				end
+			end
+		end
+		if #jewelryModule.candidates ~= 1 then return nil end
+		local candidate = jewelryModule.candidates[1]
+		local opens, closes = closureRefs(candidate.open), closureRefs(candidate.close)
+		if not opens or #opens ~= 1 or not closes or #closes ~= 6 or opens[1].tag ~= 15 or closes[3].tag ~= 15
+			or opens[1].pointer ~= candidate.cell or closes[3].pointer ~= candidate.cell
+			or instancePointer(closes[5].field) ~= remote.Address then return nil end
+		local cell = candidate.cell
+		if memory("byte", cell + 1) ~= 15 and memory("byte", cell) ~= 15 then return nil end
+		local value = memory("uintptr", cell + 8)
+		if not integer(value, 65536, 281474976710655) or memory("int", value + 12) ~= 6 then return nil end
+		local pointer = memory("uintptr", value)
+		local snapshot, kinds = nativeMap(pointer)
+		return snapshot, kinds, pointer
+	end
+	local function veritySnapshot(gui)
+		if not gui or not integer(gui.Address, 65536, 281474976710655) or not remote or remote.ClassName ~= "RemoteEvent" then return nil end
+		local function valueField(cell)
+			if not integer(cell, 65536, 281474976710655) or memory("byte", cell + 1) ~= 15 and memory("byte", cell) ~= 15 then return nil end
+			local field = memory("uintptr", cell + 8)
+			return integer(field, 65536, 281474976710655) and field or nil
+		end
+		local function capture(pointer)
+			local refs = closureRefs(pointer)
+			if not refs or #refs ~= 6 or refs[1].tag ~= 15 or refs[2].tag ~= 15 or refs[4].tag ~= 15
+				or instancePointer(valueField(refs[2].pointer)) ~= remote.Address
+				or instancePointer(valueField(refs[4].pointer)) ~= gui.Address then return nil end
+			return refs[1].pointer
+		end
+		if not verityModule or verityModule.gui ~= gui.Address then
+			verityModule = {gui = gui.Address, candidates = {}}
+			local ok, rows
+			if ctx.incidentFunctionScan then ok, rows = pcall(ctx.incidentFunctionScan, "CloseChoices", {CloseChoices = "function"})
+			else ok, rows = pcall(getgc, "CloseChoices") end
+			if not ok or type(rows) ~= "table" or #rows > 4096 then return nil end
+			local seen = {}
+			for _, row in ipairs(rows) do
+				if row.key == "CloseChoices" and integer(row.addr, 65536, 281474976710655) and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					if not seen[pointer] then
+						seen[pointer] = true
+						local cell = capture(pointer)
+						if cell then verityModule.candidates[#verityModule.candidates + 1] = {pointer = pointer, cell = cell} end
+					end
+				end
+			end
+		end
+		if #verityModule.candidates ~= 1 then return nil end
+		local candidate = verityModule.candidates[1]
+		if capture(candidate.pointer) ~= candidate.cell then return nil end
+		local field = valueField(candidate.cell)
+		if not field or memory("int", field + 12) ~= 6 then return nil end
+		local pointer = memory("uintptr", field)
+		local snapshot, kinds = nativeMap(pointer)
+		return snapshot, kinds, pointer
+	end
+	local function storageSnapshot()
+		local storageRemote = child(game.ReplicatedStorage.Remotes, "StandStorage")
+		if not storageRemote or storageRemote.ClassName ~= "RemoteEvent" then return nil end
+		if not storageModule then
+			storageModule = {candidates = {}}
+			local scan = ctx.incidentFunctionScan or findgc
+			if type(scan) ~= "function" then return nil end
+			local ok, rows = pcall(scan, "Start", {Start = "function", Stop = "function", Init = "function", Refresh = "function"})
+			if not ok or type(rows) ~= "table" or #rows > 256 then return nil end
+			local starts, stops = {}, {}
+			for _, row in ipairs(rows) do
+				if (row.key == "Start" or row.key == "Stop") and integer(row.addr, 65536, 281474976710655)
+					and memory("int", row.addr + 12) == 7 then
+					local pointer = memory("uintptr", row.addr)
+					local refs = closureRefs(pointer)
+					if refs then
+						if row.key == "Start" and #refs == 13 and refs[1].tag == 15 and instancePointer(refs[5].field) == storageRemote.Address then
+							starts[pointer] = refs[1].pointer
+						elseif row.key == "Stop" and (#refs == 9 or #refs == 10) and refs[3].tag == 15 then stops[pointer] = refs[3].pointer end
+					end
+				end
+			end
+			for start, cell in pairs(starts) do
+				for stop, other in pairs(stops) do
+					if cell == other then storageModule.candidates[#storageModule.candidates + 1] = {start = start, stop = stop, cell = cell} end
+				end
+			end
+		end
+		if #storageModule.candidates ~= 1 then return nil end
+		local candidate = storageModule.candidates[1]
+		local starts, stops = closureRefs(candidate.start), closureRefs(candidate.stop)
+		if not starts or #starts ~= 13 or not stops or (#stops ~= 9 and #stops ~= 10) or starts[1].tag ~= 15 or stops[3].tag ~= 15
+			or starts[1].pointer ~= candidate.cell or stops[3].pointer ~= candidate.cell
+			or instancePointer(starts[5].field) ~= storageRemote.Address then return nil end
+		local cell = candidate.cell
+		if memory("byte", cell + 1) ~= 15 and memory("byte", cell) ~= 15 then return nil end
+		local value = memory("uintptr", cell + 8)
+		if not integer(value, 65536, 281474976710655) or memory("int", value + 12) ~= 6 then return nil end
+		local pointer = memory("uintptr", value)
+		local snapshot, kinds = nativeMap(pointer)
+		return snapshot, kinds, pointer
+	end
+	function controller.GoFishStep(state, cached)
+		local index = type(state.active) == "string" and tonumber(state.active:match("^%d+%-(%d+)"))
+		local expired = state.active == nil and state.readable == true and storageModule and storageModule.owned ~= nil
+		if (index ~= 13 and not expired) or state.inputLock ~= true or state.dialogue == true or state.leader ~= player.UserId then return false end
+		local native, kinds, pointer = storageSnapshot()
+		local actor = child(child(ctx.world, "NPCs"), "Darby")
+		local root, character = actor and child(actor, "HumanoidRootPart"), player.Character
+		if not actor or not actor.Parent or not root or not root.Parent or not typed(native, kinds, "Npc", "Instance")
+			or native.Npc ~= actor.Address or not typed(native, kinds, "Root", "Instance") or native.Root ~= root.Address
+			or not typed(native, kinds, "State", "table") or not typed(native, kinds, "Phase", "string") or native.PvP == true then return false end
+		if expired then
+			if storageModule.owned ~= pointer then return false end
+			local now = ctx.now()
+			if now >= (storageModule.nextAction or 0) then
+				local remote = child(game.ReplicatedStorage.Remotes, "StandStorage")
+				local ok, result = pcall(function() return remote:FireServer("Close") end)
+				if ok and result ~= false then storageModule.nextAction = now + 0.5 end
+			end
+			say("Go Fish: closing the expired bounty table")
+			return true
+		end
+		local data, dataKinds = nativeMap(native.State)
+		local wager = typed(data, dataKinds, "Wager", "table") and nativeMap(data.Wager)
+		if not wager or wager.Bounty ~= true and not (storageModule.owned == pointer and storageModule.contract == state.active) then return false end
+		storageModule.owned, storageModule.contract = pointer, state.active
+		local now = ctx.now()
+		if now < (storageModule.nextAction or 0) then return true end
+		local function tap(key, text)
+			if ctx.tap(key) then storageModule.nextAction = now + 0.3 end
+			say(text)
+		end
+		if native.Phase == "Table" then
+			if native.Leaving or native.Waiting or native.Picker then say("Go Fish: waiting for the table"); return true end
+			if state.claim or wager.Bounty ~= true then tap(88, "Go Fish: leaving the native table")
+			elseif native.Selected ~= 1 then tap(37, "Go Fish: selecting the bounty wager")
+			elseif native.Action == "Unlock" then
+				local button = cached.storageAction
+				local caption = child(button, "Caption")
+				if button and button.Parent and caption and caption.Text == "CHALLENGE" then
+					if ctx.click(button) then storageModule.nextAction = now + 0.3 end
+					say("Go Fish: starting D'Arby's native challenge")
+				else tap(32, "Go Fish: starting the native bounty game") end
+			else say("Go Fish: waiting for the bounty wager") end
+			return true
+		end
+		if native.Phase ~= "Fish" then say("Go Fish: waiting for the native transition"); return true end
+		local fish, fishKinds
+		if typed(native, kinds, "Fish", "table") then fish, fishKinds = nativeMap(native.Fish) end
+		if not fish or not typed(fish, fishKinds, "Session", "table") or fish.Session ~= pointer then
+			say("Go Fish: waiting for matching card authority"); return true
+		end
+		if storageModule.fish ~= native.Fish then storageModule.fish, storageModule.missed = native.Fish, {} end
+		if fish.Phase == "Result" then
+			local actions = typed(fish, fishKinds, "ResultActions", "table") and nativeMap(fish.ResultActions)
+			if actions and (type(actions.Second) == "string" and actions.Second ~= "" or actions.First == "BACK TO THE TABLE") then
+				tap(88, "Go Fish: closing the native result")
+			elseif actions and type(actions.First) == "string" and actions.First ~= "" then tap(32, "Go Fish: retrying the native game")
+			else say("Go Fish: waiting for native result actions") end
+			return true
+		end
+		local queue
+		if typed(fish, fishKinds, "Queue", "table") then queue = nativeMap(fish.Queue) end
+		if fish.Phase ~= "Play" or fish.Ended or fish.Paused == true or fish.Pumping or fish.Waiting or not queue or next(queue) ~= nil
+			or character and (ctx.attr(character, "TimeStopped") or ctx.attr(character, "Stunned")) then
+			say("Go Fish: waiting for the native turn"); return true
+		end
+		local view, viewKinds
+		if typed(fish, fishKinds, "View", "table") then view, viewKinds = nativeMap(fish.View) end
+		if not view then say("Go Fish: waiting for the native cards"); return true end
+		local action = typed(view, viewKinds, "Action", "table") and nativeMap(view.Action)
+		if action and (action.Kind == "Draw" or action.Kind == "Give") and action.Id ~= nil then
+			if table.find(fishSymbols, action.Symbol) then
+				if action.Kind == "Draw" and action.Refill == false then storageModule.missed[action.Symbol] = true
+				elseif action.Kind == "Give" then storageModule.missed[action.Symbol] = nil end
+			end
+			tap(32, action.Kind == "Draw" and "Go Fish: drawing from the deck" or "Go Fish: giving the requested cards")
+			return true
+		end
+		if view.Turn ~= "You" or action then say("Go Fish: waiting for D'Arby"); return true end
+		local hand = typed(view, viewKinds, "Hand", "table") and nativeMap(view.Hand)
+		if not hand then say("Go Fish: waiting for the native hand"); return true end
+		for symbol, count in pairs(hand) do
+			if not table.find(fishSymbols, symbol) or not integer(count, 0, 4) then say("Go Fish: waiting for valid native cards"); return true end
+		end
+		local best, bestCount, bestSlot, slot = nil, 0, nil, 0
+		local alternative = false
+		for _, symbol in ipairs(fishSymbols) do if (hand[symbol] or 0) > 0 and not storageModule.missed[symbol] then alternative = true; break end end
+		if not alternative then storageModule.missed = {} end
+		for _, symbol in ipairs(fishSymbols) do
+			local count = hand[symbol]
+			if count and count > 0 then
+				slot += 1
+				if not storageModule.missed[symbol] and count > bestCount then best, bestCount, bestSlot = symbol, count, slot end
+			end
+		end
+		if bestSlot then tap(48 + bestSlot, "Go Fish: asking for " .. best)
+		else say("Go Fish: waiting for matching legal cards") end
+		return true
 	end
 	local function drawingReference(pointer)
 		local strokes, kinds, count = readMap(pointer, 64)
@@ -7892,7 +8318,7 @@ _G.StandOutParts.Incidents = function(ctx)
 		return ok and accepted ~= false
 	end
 	local function clear()
-		if session and session.ownedSpace then ctx.release(32) end
+		if session and session.ownedPress then ctx.release(1) end
 		session = nil
 	end
 	local function enter(kind, key, state)
@@ -7902,7 +8328,7 @@ _G.StandOutParts.Incidents = function(ctx)
 		end
 		return session
 	end
-	local function acquire(owner, anchor, schema, accepts, slots, acceptsRow)
+	local function acquire(owner, anchor, schema, accepts, slots, acceptsRow, unique)
 		if owner.pointer then return true end
 		local now = ctx.now()
 		if now - owner.born < 0.4 or (owner.scanAt and now - owner.scanAt < 1) then return false end
@@ -7916,13 +8342,13 @@ _G.StandOutParts.Incidents = function(ctx)
 			if not owner.scanRows or type(refreshNative) ~= "function" then return false end
 			local ok, rows = pcall(refreshNative, owner.scanRows)
 			if not ok or rows == false then return false end
-			if type(rows) == "table" then owner.scanRows = rows end
+			if type(rows) == "table" and #rows > 0 then owner.scanRows = rows end
 		end
 		local rows = owner.scanRows
-		local seen, examined = {}, 0
+		local seen, examined, selected = {}, 0, nil
 		local tag = ({ table = 6, number = 3, string = 5, boolean = 1 })[schema[anchor]]
 		for index = 1, #rows do
-			if examined >= 64 then break end
+			if examined >= 64 then if unique then return false end; break end
 			local row = rows[index]
 			local pointer = row.tbl
 			if (row.vtt == nil or tag == nil or row.vtt == tag) and (not acceptsRow or acceptsRow(row))
@@ -7930,9 +8356,14 @@ _G.StandOutParts.Incidents = function(ctx)
 				seen[pointer] = true
 				examined += 1
 				local map, kinds = readMap(pointer, slots)
-				if accepts(map, kinds) then owner.pointer = pointer; return true end
+				if accepts(map, kinds) then
+					if not unique then owner.pointer = pointer; return true end
+					if selected then return false end
+					selected = pointer
+				end
 			end
 		end
+		if selected then owner.pointer = selected; return true end
 		return false
 	end
 	local function dialogueChoices(gui, npc)
@@ -7965,7 +8396,8 @@ _G.StandOutParts.Incidents = function(ctx)
 			decline = progress.IncidentPhase == "report" and "one moment" or "i'll be back"
 		else return false end
 		local choices, count = dialogueChoices(cached.gui, npc)
-		if not choices or count ~= 2 or not choices[accept] or not choices[decline] then return false end
+		if not choices or not choices[accept] or not choices[decline]
+			or count ~= 2 and not (count == 3 and npc == "Meryl Mei Qi" and choices["about driving practice"]) then return false end
 		local owned = false
 		for _, scene in ipairs(scenes or {}) do
 			local id = ctx.attr(scene, "BountyId") or ctx.attr(scene, "Bounty")
@@ -7978,6 +8410,24 @@ _G.StandOutParts.Incidents = function(ctx)
 			local a, b = root and root.Position, actor and ctx.position(actor)
 			if a and b and finite(a.X) and finite(a.Y) and finite(a.Z) and finite(b.X) and finite(b.Y) and finite(b.Z)
 				and (a - b).Magnitude <= 8 then
+				local phase, marker = progress.IncidentPhase, state.targetMarker
+				local actorRoot, detector = child(actor, "HumanoidRootPart"), child(actor, "ClickDetector")
+				if state.leader == player.UserId and (npc == "Meryl Mei Qi" and (phase == "meryl" or phase == "report") or npc == "Dragona" and phase == "dragona")
+					and actor.ClassName == "Model" and actor.Parent and actor.Parent.Address == child(ctx.world, "NPCs").Address
+					and actorRoot and actorRoot.Parent and actorRoot.Parent.Address == actor.Address
+					and detector and detector.Parent and detector.Parent.Address == actor.Address and detector.ClassName == "ClickDetector"
+					and marker and finite(marker.X) and finite(marker.Y) and finite(marker.Z) and (marker - b).Magnitude <= 8 then
+					owned = true
+					for _, object in ipairs({ actor, actorRoot, detector }) do
+						local id = ctx.attr(object, "BountyId") or ctx.attr(object, "Bounty")
+						local leader = ctx.attr(object, "BountyLeaderId") or ctx.attr(object, "BountyOwnerId")
+						local owner, carrier = ctx.attr(object, "StoryPromptOwnerId"), ctx.attr(object, "BountyDeliveryCarrierId")
+						if id ~= nil and tostring(id) ~= state.active or leader ~= nil and tonumber(leader) ~= state.leader
+							or owner ~= nil and tonumber(owner) ~= player.UserId or carrier ~= nil and tonumber(carrier) ~= player.UserId
+							or ctx.attr(object, "StoryPromptAvailable") == false or ctx.attr(object, "BountySourceHidden") == true
+							or ctx.attr(object, "BountyDeliveryAvailable") == false then owned = false; break end
+					end
+				end
 				for _, prompt in ipairs(ctx.findPrompts(actor)) do
 					local id = ctx.attr(prompt, "BountyId") or ctx.attr(prompt, "Bounty")
 					local owner = ctx.attr(prompt, "StoryPromptOwnerId")
@@ -7994,15 +8444,15 @@ _G.StandOutParts.Incidents = function(ctx)
 		end
 		if not owned then return false end
 		local owner = enter("JewelryDialogue", token .. "|" .. npc .. "|" .. tostring(progress.IncidentPhase) .. "|" .. accept, state)
-		if owner.answered then say("Jewelry: waiting for the dialogue result"); return true end
-		if send(nil, { Id = state.active, Token = token, NPC = npc }) then owner.answered = true end
+		local now = ctx.now()
+		if owner.answerAt and now - owner.answerAt < 1 then say("Jewelry: waiting for the dialogue result"); return true end
+		if ctx.tap(48 + choices[accept]) then owner.answerAt = now end
 		say("Jewelry: " .. (progress.IncidentPhase == "report" and "reporting the necklace and evidence" or "starting " .. npc .. "'s native task"))
 		return true
 	end
 	local function darbyRules(state, cached, scenes)
 		local progress = state.progress
 		if state.dialogue ~= true or state.inputLock ~= true or type(progress) ~= "table" or progress.ReadyToClaim == true
-			or type(progress.IncidentNPC) ~= "string" or progress.IncidentNPC == ""
 			or not integer(state.leader, 1, 9007199254740991) or type(ctx.position) ~= "function" then return false end
 		local choices, count = dialogueChoices(cached.gui, "D'Arby")
 		if not choices or not choices["not now"] then return false end
@@ -8013,6 +8463,19 @@ _G.StandOutParts.Incidents = function(ctx)
 		local position = root and root.Position
 		if not position or not finite(position.X) or not finite(position.Y) or not finite(position.Z) then return false end
 		local actor
+		local nativeRules = progress.IncidentNPC == nil or progress.IncidentNPC == ""
+		if nativeRules then
+			actor = child(child(ctx.world, "NPCs"), "Darby")
+			local root = child(actor, "HumanoidRootPart")
+			if state.leader ~= player.UserId or not actor or not root then return false end
+			local native, kinds = storageSnapshot()
+			if not typed(native, kinds, "Npc", "Instance") or native.Npc ~= actor.Address
+				or not typed(native, kinds, "Root", "Instance") or native.Root ~= root.Address or native.Phase ~= "Fish" or native.PvP == true
+				or not typed(native, kinds, "State", "table") then return false end
+			local data, dataKinds = nativeMap(native.State)
+			local wager = typed(data, dataKinds, "Wager", "table") and nativeMap(data.Wager)
+			if not wager or wager.Bounty ~= true then return false end
+		elseif type(progress.IncidentNPC) ~= "string" then return false end
 		for _, scene in ipairs(scenes or {}) do
 			local id = ctx.attr(scene, "BountyId") or ctx.attr(scene, "Bounty")
 			if scene.Parent and id ~= nil and tostring(id) == state.active and tonumber(ctx.attr(scene, "BountyLeaderId")) == state.leader then
@@ -8036,46 +8499,62 @@ _G.StandOutParts.Incidents = function(ctx)
 		end
 		local point = actor and child(actor, "HumanoidRootPart") and ctx.position(actor)
 		if not point or not finite(point.X) or not finite(point.Y) or not finite(point.Z) or (position - point).Magnitude > 8 then return false end
+		local marker = state.targetMarker or state.marker
+		if nativeRules and (not marker or not finite(marker.X) or not finite(marker.Y) or not finite(marker.Z) or (marker - point).Magnitude > 8) then return false end
 		local id, leader = ctx.attr(actor, "BountyId") or ctx.attr(actor, "Bounty"), ctx.attr(actor, "BountyLeaderId")
 		if id ~= nil and tostring(id) ~= state.active or leader ~= nil and tonumber(leader) ~= state.leader then return false end
 		local owner = enter("GoFishRules", tostring(actor.Address or actor:GetFullName()) .. "|" .. tostring(number), state)
-		if owner.answered then say("Go Fish: waiting for the native deal"); return true end
-		if ctx.tap(48 + number) then owner.answered = true end
+		local now = ctx.now()
+		if owner.answerAt and now - owner.answerAt < 1 then say("Go Fish: waiting for the native deal"); return true end
+		if ctx.tap(48 + number) then owner.answerAt = now end
 		say("Go Fish: accepting D'Arby's native deal")
 		return true
 	end
 	local function jewelry(state)
 		local ownerKey = ctx.attr(game.Workspace.Camera, "JewelryInspectionOwner")
 		local token = currentToken(state)
-		local owner = enter("Jewelry", tostring(ownerKey or token or state.active), state)
-		if type(ownerKey) ~= "string" or ownerKey == "" then say("Jewelry: waiting for camera authority"); return true end
+		local cameraOwned = type(ownerKey) == "string" and ownerKey ~= ""
+		local owner = enter("Jewelry", tostring(cameraOwned and ownerKey or token or state.active), state)
+		if not cameraOwned and (state.jewelry ~= true or type(token) ~= "string" or token == "") then say("Jewelry: waiting for camera authority"); return true end
 		local function accepts(map, kinds)
-			if not typed(map, kinds, "id", "string") or map.id ~= state.active
-				or not typed(map, kinds, "token", "string") or map.token ~= ownerKey
+			if not typed(map, kinds, "id", "string") or map.id ~= state.active or map.finished == true
+				or not typed(map, kinds, "token", "string") or map.token == "" or cameraOwned and map.token ~= ownerKey
 				or not typed(map, kinds, "payload", "table") or not typed(map, kinds, "rows", "table") then return false end
 			local payload, payloadKinds = readMap(map.payload, 32)
 			return typed(payload, payloadKinds, "Token", "string") and (token == nil or payload.Token == token)
 				and typed(payload, payloadKinds, "Version", "number") and integer(payload.Version, 0, 100000)
 		end
-		local function acceptsRow(row) return row.key == "token" and stringValue(row.value) == ownerKey end
-		if not acquire(owner, "token", { token = "string", id = "string", payload = "table", rows = "table" }, accepts, 64, acceptsRow) then
-			say("Jewelry: waiting for the native puzzle session"); return true
+		local native, nativeKinds
+		if type(scanFunctions) == "function" then
+			if ctx.now() - owner.born < 0.4 then say("Jewelry: waiting for the native puzzle session"); return true end
+			local pointer
+			native, nativeKinds, pointer = jewelrySnapshot()
+			if not native then say("Jewelry: waiting for the native puzzle session"); return true end
+			if owner.pointer ~= pointer then owner.pointer, owner.request = pointer, nil end
+		else
+			local anchor = cameraOwned and "token" or "id"
+			local function acceptsRow(row) return row.key == anchor and stringValue(row.value) == (cameraOwned and ownerKey or state.active) end
+			if not acquire(owner, anchor, { token = "string", id = "string", payload = "table", rows = "table" }, accepts, 128, acceptsRow, not cameraOwned) then
+				say("Jewelry: waiting for the native puzzle session"); return true
+			end
+			native, nativeKinds = readMap(owner.pointer, 128)
 		end
-		local native, nativeKinds = readMap(owner.pointer, 64)
 		if not accepts(native, nativeKinds) then say("Jewelry: waiting for matching puzzle authority"); return true end
 		local payload, kinds = readMap(native.payload, 32)
-		if owner.evidenceTaken then say("Jewelry: waiting for the evidence result"); return true end
 		if native.pending == true then say("Jewelry: waiting for the current placement"); return true end
 		if owner.request then
-			if payload.Version <= owner.request.version then
+			local request, now = owner.request, ctx.now()
+			if payload.Version < request.version or payload.Version == request.version and native.payload == request.payload then
+				if now - (request.keepaliveAt or request.at) >= 2
+					and send("InspectKeepalive", { Id = native.id, Token = payload.Token }) then request.keepaliveAt = now end
 				say("Jewelry: waiting for the placement acknowledgment"); return true
 			end
-			if owner.request.component then
-				local placed = typed(payload, kinds, "Placed", "table") and readMap(payload.Placed, 8)
-				if not placed or placed[owner.request.component] ~= true then say("Jewelry: waiting for the fitted component"); return true end
-			elseif owner.request.row then
-				local values = typed(payload, kinds, "Values", "table") and readMap(payload.Values, 4)
-				if not values or values[owner.request.row] ~= owner.request.notch then say("Jewelry: waiting for the aligned clasp"); return true end
+			local placed = request.component and typed(payload, kinds, "Placed", "table") and readMap(payload.Placed, 8)
+			local values = request.row and typed(payload, kinds, "Values", "table") and readMap(payload.Values, 4)
+			local accepted = placed and placed[request.component] == true or values and values[request.row] == request.notch
+				or request.action == "TakeEvidence" and payload.Stage ~= "Evidence"
+			if not accepted and now - request.at < 2 then
+				say("Jewelry: waiting before retrying the placement"); return true
 			end
 			owner.request = nil
 		end
@@ -8106,8 +8585,8 @@ _G.StandOutParts.Incidents = function(ctx)
 			end
 		end
 		if action and send(action, packet) then
-			owner.request = { version = payload.Version, action = action, component = packet.Component, row = packet.Row, notch = packet.Notch }
-			owner.evidenceTaken = action == "TakeEvidence"
+			owner.request = { version = payload.Version, payload = native.payload, at = ctx.now(), action = action,
+				component = packet.Component, row = packet.Row, notch = packet.Notch }
 			say(action == "TakeEvidence" and "Jewelry: taking the restored evidence" or "Jewelry: fitting " .. tostring(packet.Component or ("clasp " .. packet.Row)))
 		else say("Jewelry: waiting for the puzzle stage to advance") end
 		return true
@@ -8143,62 +8622,88 @@ _G.StandOutParts.Incidents = function(ctx)
 		end
 		if memory.submitted or native.Submitting == true or native.SubmitQueued == true then say("Rohan: waiting for the drawing result"); return true end
 		if memory.request then
-			if native.Index == memory.request.index or not integer(native.Index, 1, 65) then
-				say("Rohan: waiting for stroke " .. (memory.completed + 1) .. " acknowledgment"); return true
-			end
-			if memory.request.index ~= nil and native.Index ~= memory.request.index + 1 then
+			if native.Index == memory.request.index then
+				if native.Pending == true or ctx.now() - memory.request.at < 2 then
+					say("Rohan: waiting for stroke " .. (memory.completed + 1) .. " acknowledgment"); return true
+				end
+			elseif not integer(native.Index, 1, 65) or memory.request.index ~= nil and native.Index ~= memory.request.index + 1 then
 				say("Rohan: waiting for the next native stroke index"); return true
+			else
+				memory.completed += 1
 			end
-			memory.completed += 1
 			memory.request = nil
 		end
 		if native.Pending == true then say("Rohan: waiting for the current native stroke"); return true end
 		if native.Index ~= nil and not integer(native.Index, 1, 65) then say("Rohan: waiting for a valid stroke index"); return true end
-		if memory.completed == 0 and native.Index ~= nil then say("Rohan: waiting for a fresh contest before drawing"); return true end
+		if memory.completed == 0 and native.Index ~= nil and native.Index ~= 1 then say("Rohan: waiting for a fresh contest before drawing"); return true end
 		local packet = { Id = native.Id, Token = native.Token }
 		if memory.completed == #reference then
 			if send("DrawingSubmit", packet) then memory.submitted = true; say("Rohan: submitting the completed drawing") end
 		else
 			packet.Index, packet.Points = native.Index, sampleStroke(reference[memory.completed + 1], 128)
 			if send("DrawingStroke", packet) then
-				memory.request = { index = native.Index }
+				memory.request = { index = native.Index, at = ctx.now() }
 				say("Rohan: drawing stroke " .. (memory.completed + 1) .. " / " .. #reference)
 			end
 		end
 		return true
 	end
+	local function armState(owner)
+		local readStarted = ctx.now()
+		owner.resting, owner.checkedAt = false, nil
+		local function accepts(map, kinds)
+			return typed(map, kinds, "Id", "string") and map.Id == owner.key
+				and typed(map, kinds, "Side", "number") and integer(map.Side, 1, 2)
+				and typed(map, kinds, "Connections", "table") and map.Variant ~= "Lockpick" and map.Variant ~= "Breath"
+		end
+		local native, kinds
+		if type(scanFunctions) == "function" or type(getgc) == "function" then
+			local pointer
+			native, kinds, pointer = armSnapshot()
+			if owner.pointer ~= pointer then
+				if owner.ownedPress then ctx.release(1) end
+				owner.pointer, owner.round, owner.lastAngle, owner.lastAt, owner.pressed, owner.moving, owner.ownedPress = pointer, nil, nil, nil, false, false, false
+			end
+			if not native then owner.round = nil; return nil, "Paco: waiting for the native arm-wrestling session" end
+		else
+			if not acquire(owner, "Side", {Side = "number", Connections = "table", Id = "string"}, accepts, 64) then
+				owner.round = nil; return nil, "Paco: waiting for the native arm-wrestling session"
+			end
+			native, kinds = readMap(owner.pointer, 64)
+		end
+		if not accepts(native, kinds) or native.Ended == true then owner.round = nil; return nil, "Paco: waiting for the match result" end
+		owner.checkedAt = readStarted
+		if not typed(native, kinds, "Round", "number") or not integer(native.Round, 1, 40)
+			or not typed(native, kinds, "Target", "number") or native.Target < 0 or native.Target > 360
+			or not typed(native, kinds, "Duration", "number") or native.Duration < 0.1 or native.Duration > 10 then
+			owner.round = nil
+			owner.resting = native.Round == nil and typed(native, kinds, "ReadyAt", "number") and finite(native.ReadyAt)
+			return nil, "Paco: waiting for the round countdown"
+		end
+		if owner.round ~= native.Round then
+			owner.round, owner.lastAngle, owner.lastAt, owner.pressed, owner.moving = native.Round, nil, nil, false, false
+		end
+		owner.target, owner.nativePressed, owner.checkedAt = native.Target, native.Pressed == true, readStarted
+		return native, "Paco: timing round " .. native.Round
+	end
 	local function armWrestling(state, gui)
-		local id = tostring(state.armSession)
-		local owner = enter("Paco", id, state)
+		local owner = enter("Paco", tostring(state.armSession), state)
 		local panel = child(child(gui, "ArmWrestling"), "Panel")
 		owner.track = child(panel, "Track")
 		owner.cursor = child(owner.track, "Cursor")
 		local _, _, character = ctx.getRoot()
 		owner.character = character
-		local function accepts(map, kinds)
-			return typed(map, kinds, "Id", "string") and map.Id == id
-				and typed(map, kinds, "Side", "number") and integer(map.Side, 1, 2)
-				and typed(map, kinds, "Connections", "table") and map.Variant ~= "Lockpick" and map.Variant ~= "Breath"
-		end
-		if not acquire(owner, "MaxMisses", { Side = "number", Connections = "table", MaxMisses = "number" }, accepts, 64) then
-			say("Paco: waiting for the native arm-wrestling session"); return true
-		end
-		local native, kinds = readMap(owner.pointer, 64)
-		if not accepts(native, kinds) or native.Ended == true then owner.round = nil; say("Paco: waiting for the match result"); return true end
-		if not typed(native, kinds, "Round", "number") or not integer(native.Round, 1, 40)
-			or not typed(native, kinds, "Target", "number") or native.Target < 0 or native.Target > 360
-			or not typed(native, kinds, "Duration", "number") or native.Duration < 0.1 or native.Duration > 10 then
-			say("Paco: waiting for the round countdown"); return true
-		end
-		if owner.round ~= native.Round then
-			owner.round, owner.lastAngle, owner.lastAt, owner.pressed, owner.moving = native.Round, nil, nil, false, false
-		end
-		owner.target, owner.nativePressed = native.Target, native.Pressed == true
-		say("Paco: timing round " .. native.Round)
+		local _, status = armState(owner)
+		say(status)
 		return true
 	end
 	local function verity(state, cached, scenes)
-		local confirmedBox = type(state.progress) == "table" and state.progress.IncidentPhase == "box"
+		if state.targetMarker then
+			local root = ctx.getRoot()
+			if not root or (root.Position - state.targetMarker).Magnitude > 8 then return false end
+		end
+		local phase = type(state.progress) == "table" and state.progress.IncidentPhase
+		local confirmedBox = phase == "box" or phase == "helper" or phase == "question"
 		local owned = state.verityBox == true
 		for _, scene in ipairs(scenes or {}) do
 			if scene.Name == "Incident_Verity" then
@@ -8210,7 +8715,8 @@ _G.StandOutParts.Incidents = function(ctx)
 		if not owned and not authenticatedBox then return false end
 		local buttons = { child(cached.choices, "Choice1"), child(cached.choices, "Choice2") }
 		local title = child(cached.choices, "Title")
-		if not title or tostring(title.Text or ""):lower() ~= "ask berity" then return false end
+		local heading = tostring(title and title.Text or ""):lower()
+		if heading ~= "ask berity" and heading ~= "your personal helper friend" and heading ~= "hubert's missing package" then return false end
 		for index = 1, 2 do
 			local size = buttons[index] and buttons[index].AbsoluteSize
 			if not size or size.X <= 10 or size.Y <= 10 then
@@ -8240,22 +8746,83 @@ _G.StandOutParts.Incidents = function(ctx)
 			if choices[3] ~= nil or packets[1].Id == packets[2].Id then return nil end
 			return packets
 		end
-		local function accepts(map, kinds) return choicesFor(map, kinds) ~= nil end
-		if not acquire(owner, "Choices", { Id = "string", Token = "string", Choices = "table" }, accepts, 64) then
-			say("Berity: waiting for the native question session"); return confirmedBox
+		local map, kinds
+		if type(scanFunctions) == "function" then
+			if ctx.now() - owner.born < 0.4 then return false end
+			local pointer
+			map, kinds, pointer = veritySnapshot(cached.choices)
+			if not map then
+				owner.pointer, owner.answered = nil, nil
+				say("Berity: waiting for the native question session"); return false
+			end
+			if owner.pointer ~= pointer then owner.pointer, owner.answered = pointer, nil end
+		else
+			local function accepts(map, kinds) return choicesFor(map, kinds) ~= nil end
+			if not acquire(owner, "Choices", { Id = "string", Token = "string", Choices = "table" }, accepts, 64) then
+				say("Berity: waiting for the native question session"); return false
+			end
+			map, kinds = readMap(owner.pointer, 64)
 		end
-		local map, kinds = readMap(owner.pointer, 64)
 		local choices = choicesFor(map, kinds)
 		if not choices then say("Berity: waiting for matching question authority"); return confirmedBox end
-		if owner.answered then say("Berity: waiting for the answer"); return true end
-		if send(nil, { Id = map.Id, Token = map.Token, Choice = choices[selected].Id }) then
-			owner.answered = true
+		if owner.answered and ctx.now() - owner.answered < 1 then say("Berity: waiting for the answer"); return true end
+		local point, size = buttons[selected].AbsolutePosition, buttons[selected].AbsoluteSize
+		if not point or not finite(point.X) or not finite(point.Y) then say("Berity: waiting for the native answer button"); return true end
+		local viewport = game.Workspace.Camera.ViewportSize
+		local x = size and size.X > 1 and point.X + size.X / 2 or viewport.X / 2
+		local y = point.Y + (size and size.Y > 1 and size.Y / 2 or 24)
+		if ctx.mouseMove(x, y, nil, true) and ctx.tap(1) then
+			owner.answered = ctx.now()
 			say("Berity: asking about Hubert's missing package")
 		end
 		return true
 	end
+	function controller.TabletopState(owner, state)
+		local index = type(state.active) == "string" and tonumber(state.active:match("^%d+%-(%d+)"))
+		if index ~= 14 or state.claim or not owner or type(owner.owner) ~= "string" or owner.owner == ""
+			or ctx.attr(player, "TabletopInputOwner") ~= owner.owner then return nil end
+		owner.born = owner.born or ctx.now()
+		local function accepts(map, kinds)
+			return typed(map, kinds, "Token", "string") and map.Token == owner.owner and map.Action == "Tabletop_" .. owner.owner
+				and typed(map, kinds, "State", "table") and typed(map, kinds, "Steps", "table")
+				and typed(map, kinds, "Props", "table") and typed(map, kinds, "Connections", "table")
+		end
+		local map, kinds
+		if type(scanFunctions) == "function" then
+			map, kinds = tabletopSnapshot()
+		else
+			if not acquire(owner, "Token", { Token = "string", State = "table", Steps = "table", Props = "table", Connections = "table" }, accepts, 128, nil, true) then return nil end
+			map, kinds = readMap(owner.pointer, 128)
+		end
+		if not accepts(map, kinds) then return nil end
+		local progress, progressKinds = readMap(map.State, 32)
+		if not typed(progress, progressKinds, "Index", "number") or not integer(progress.Count, 1, 64)
+			or not integer(progress.Index, 1, progress.Count + 1) or (progress.Done ~= nil and progressKinds.Done ~= "boolean") then return nil end
+		local result = { Index = progress.Index, Done = progress.Done == true, Ending = map.Ending == true }
+		if result.Done or result.Ending then return result end
+		local steps, stepKinds = readMap(map.Steps, 64)
+		if not typed(steps, stepKinds, progress.Index, "table") then return nil end
+		local step = readMap(steps[progress.Index], 32)
+		if not step or (step.Kind ~= "Drag" and step.Kind ~= "Click" and step.Kind ~= "Hold" and step.Kind ~= "Wait") then return nil end
+		result.Kind = step.Kind
+		return result
+	end
+	function controller.KaraokeSubmitted(owner, state)
+		local index = type(state.active) == "string" and tonumber(state.active:match("^%d+%-(%d+)"))
+		if index ~= 12 or state.claim or not owner or type(owner.session) ~= "string" or owner.session == ""
+			or ctx.attr(player, "KaraokeInputLocked") ~= owner.session then return nil end
+		owner.born = owner.born or ctx.now()
+		local function accepts(map, kinds)
+			return typed(map, kinds, "Id", "string") and map.Id == owner.session
+				and typed(map, kinds, "Connections", "table") and typed(map, kinds, "Cleanups", "table")
+				and map.Config == nil and (map.Submitted == nil or kinds.Submitted == "boolean")
+		end
+		if not acquire(owner, "Id", { Id = "string", Connections = "table", Cleanups = "table" }, accepts, 64, nil, true) then return nil end
+		local map, kinds = readMap(owner.pointer, 64)
+		return accepts(map, kinds) and map.Submitted == true or nil
+	end
 	function controller.Step(state, cached, scenes)
-		if not state.active or state.claim then clear(); return false end
+		if not state.active or state.claim or type(state.progress) == "table" and state.progress.ReadyToClaim == true then clear(); return false end
 		local _, index = tostring(state.active):match("^(%d+)%-(%d+)")
 		index = tonumber(index)
 		if index == 6 then
@@ -8263,10 +8830,14 @@ _G.StandOutParts.Incidents = function(ctx)
 			if state.jewelry then return jewelry(state) end
 		end
 		if index == 13 and darbyRules(state, cached, scenes) then return true end
-		if index == 10 and state.armSession then return armWrestling(state, cached.gui) end
+		if index == 10 then
+			if state.armSession then return armWrestling(state, cached.gui) end
+			if not armModule and state.leader == player.UserId and type(state.progress) == "table" and state.progress.IncidentPhase == "table"
+				and (type(scanFunctions) == "function" or type(getgc) == "function") then armSnapshot() end
+		end
 		local token = ctx.attr(player, "RohanDrawingToken")
 		if index == 11 and type(token) == "string" and token ~= "" then return drawing(state, cached.gui, token) end
-		if index == 8 and (state.verityBox == true or (type(state.progress) == "table" and state.progress.IncidentPhase == "box")) then
+		if index == 8 and (state.verityBox == true or (type(state.progress) == "table" and (state.progress.IncidentPhase == "box" or state.progress.IncidentPhase == "helper" or state.progress.IncidentPhase == "question"))) then
 			local handled = verity(state, cached, scenes)
 			if handled then return true end
 			if session and session.kind == "Verity" then return false end
@@ -8276,21 +8847,36 @@ _G.StandOutParts.Incidents = function(ctx)
 	end
 	function controller.Render()
 		local owner = session
-		if not owner or owner.kind ~= "Paco" or not owner.round then return end
+		if not owner or owner.kind ~= "Paco" then return end
 		local character = owner.character
 		if not character or tostring(ctx.attr(character, "ArmWrestlingSession")) ~= owner.key then clear(); return end
-		if owner.pressed or owner.nativePressed then return end
-		local angle, now = cursorAngle(owner.track, owner.cursor), ctx.now()
+		if not owner.checkedAt or ctx.now() - owner.checkedAt > 0.1 or owner.pressed or owner.nativePressed
+			or not owner.round and not owner.resting then return end
+		owner.geometry = owner.geometry or {}
+		owner.geometry.resting = owner.resting
+		local angle, reset = cursorAngle(owner.track, owner.cursor, owner.geometry)
+		if reset then owner.lastAngle, owner.lastAt, owner.moving = nil, nil, false end
 		if angle == nil then return end
+		if not owner.round then return end
+		local point, size = owner.track.AbsolutePosition, owner.track.AbsoluteSize
+		local width = size and size.X > 10 and size.X or owner.geometry.width
+		local height = size and size.Y > 10 and size.Y or owner.geometry.height
+		local pointerReady = point and width and height and ctx.mouseMove(point.X + width / 2, point.Y + height / 2, "Paco", true)
+		local now = ctx.now()
 		local previous, elapsed = owner.lastAngle, owner.lastAt and now - owner.lastAt or 0
-		if previous and angle > previous and angle - previous <= 45 then owner.moving = true end
-		local crossed = previous and angle >= previous and angle - previous <= 45 and previous <= owner.target and angle >= owner.target
+		local delta = previous and (angle - previous) % 360
+		local forward = delta and delta > 0 and delta <= 45
+		if forward then owner.moving = true end
+		local current, target = forward and previous + delta or angle, owner.target
+		if forward and target < previous and current >= 360 then target += 360 end
+		local crossed = forward and previous <= target and current >= target
 		local approaching = false
-		if previous and elapsed > 0 and elapsed < 0.1 and angle >= previous and angle - previous < 45 then
-			approaching = angle <= owner.target and angle + (angle - previous) * 0.5 >= owner.target
+		if forward and elapsed > 0 and elapsed < 0.1 then
+			approaching = current <= target and current + delta * 0.5 >= target
 		end
-		if owner.moving and (crossed or approaching or math.abs(angle - owner.target) <= 1) then
-			if ctx.tap(32) then owner.pressed, owner.ownedSpace = true, true end
+		local gap = math.abs(angle - owner.target)
+		if pointerReady and owner.moving and (crossed or approaching or math.min(gap, 360 - gap) <= 1) then
+			if ctx.tap(1) then owner.pressed, owner.ownedPress = true, true end
 		end
 		owner.lastAngle, owner.lastAt = angle, now
 	end
@@ -8308,8 +8894,6 @@ _G.StandOutParts.Incidents = function(ctx)
 	return controller
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 local bountyOrder = { 1, 5, 2, 6, 3, 7, 8, 9, 10, 11, 12, 13, 14 }
@@ -8436,6 +9020,13 @@ local function canonicalNPC(s)
 	return name == "rohankishibe" and "rohan" or name == "pacochallenge" and "paco"
 		or name == "usagikaraoke" and "usagi" or name
 end
+local function jewelryNPC(progress, id)
+	local _, index = parseId(id)
+	if index ~= 6 or type(progress) ~= "table" or progress.IncidentScenario ~= "Jewelry" or progress.ReadyToClaim == true
+		or type(progress.IncidentToken) ~= "string" or progress.IncidentToken == "" then return nil end
+	local npc, phase = progress.IncidentNPC, progress.IncidentPhase
+	return (npc == "Meryl Mei Qi" and (phase == "meryl" or phase == "report") or npc == "Dragona" and phase == "dragona") and npc or nil
+end
 local function karaokeGoal(progress, objective, id)
 	local _, index = parseId(id)
 	if index ~= 12 then return false end
@@ -8450,12 +9041,16 @@ local function karaokeSong(progress, objective, id)
 	return type(instruction) == "string" and instruction:match("^[Ss]ing (.-) [Ww]ith [Uu]sagi") or nil
 end
 local function talkTarget(progress, objective, id)
+	local _, index = parseId(id)
+	if index == 13 then return "darby" end
+	if index == 10 and type(progress) == "table" and progress.IncidentPhase == "hospital" then return "hospitalnurse" end
+	local jewelry = jewelryNPC(progress, id)
+	if jewelry then return canonicalNPC(jewelry) end
 	local instruction = type(progress) == "table" and progress.IncidentObjective or objective
 	local target = type(instruction) == "string" and instruction:match("[Tt]alk%s+to%s+(.+)")
 	if target then
 		return canonicalNPC(target:gsub("%s+%d+%s*/%s*%d+.*$", ""))
 	end
-	local _, index = parseId(id)
 	local namedFamily = index == 10 and "Paco" or index == 11 and "Rohan" or index == 12 and "Usagi"
 	local scenario = type(progress) == "table" and progress.IncidentScenario
 	if type(scenario) == "string" and namedFamily and normalized(scenario) == normalized(namedFamily) then
@@ -8464,18 +9059,38 @@ local function talkTarget(progress, objective, id)
 	return namedFamily and normalized(namedFamily) or nil
 end
 local function markerVector(value)
-	if validVector(value) then
-		return value
-	end
-	if type(value) ~= "table" then
+	local kind, x, y, z = type(value)
+	if kind == "table" then
+		x, y, z = value.x or value.X or value[1], value.y or value.Y or value[2], value.z or value.Z or value[3]
+	elseif kind == "string" then
+		x, y, z = value:match("^%s*([%-%.%d]+)%s*[,%s]+%s*([%-%.%d]+)%s*[,%s]+%s*([%-%.%d]+)%s*$")
+	elseif kind == "userdata" or kind == "vector" then
+		return validVector(value) and value or nil
+	else
 		return nil
 	end
-	local x, y, z = tonumber(value.x), tonumber(value.y), tonumber(value.z)
+	x, y, z = tonumber(x), tonumber(y), tonumber(z)
 	if not finite(x) or not finite(y) or not finite(z) then
 		return nil
 	end
 	local point = Vector3.new(x, y, z)
 	return validVector(point) and point or nil
+end
+
+local function progressTarget(progress)
+	if type(progress) ~= "table" then return nil end
+	local marker, path, name
+	for _, key in ipairs({ "TargetPos", "TargetPosition", "WorldPos", "WorldPosition", "ObjectivePos", "ObjectivePosition", "WaypointPos", "Waypoint", "MarkerPos", "Position", "Pos" }) do
+		marker = markerVector(progress[key])
+		if marker then break end
+	end
+	for _, key in ipairs({ "TargetPath", "ObjectivePath", "WaypointPath" }) do
+		if type(progress[key]) == "string" and progress[key] ~= "" then path = progress[key]; break end
+	end
+	for _, key in ipairs({ "TargetName", "ObjectiveName", "WaypointName", "Target", "Objective", "Location" }) do
+		if type(progress[key]) == "string" and progress[key] ~= "" then name = progress[key]; break end
+	end
+	return marker, path, name
 end
 
 local function keyCode(text)
@@ -8561,9 +9176,12 @@ _G.StandOutParts.Bounties = function(ctx)
 
 	local function textOf(object)
 		if not object then return "" end
-		local label = object.ClassName == "TextLabel" and object or child(object, "TextLabel", true) or child(object, "Label", true)
-		local text = label and label.ClassName == "TextLabel" and (label.Text or "") or ""
-		return text ~= "failed to fetch text" and text or ""
+		local text = object.Text
+		if type(text) ~= "string" then
+			local label = child(object, "TextLabel", true) or child(object, "Label", true)
+			text = label and label.Text
+		end
+		return type(text) == "string" and text ~= "failed to fetch text" and text or ""
 	end
 
 	local function label(parent, name)
@@ -8608,8 +9226,9 @@ _G.StandOutParts.Bounties = function(ctx)
 	end
 
 	local function hold(key)
+		if ctx.hold(key) == false then return false end
 		inputs[key] = true
-		ctx.hold(key)
+		return true
 	end
 
 	local function release(key)
@@ -8625,7 +9244,13 @@ _G.StandOutParts.Bounties = function(ctx)
 		if class == "Part" or class == "MeshPart" or class == "UnionOperation" or class == "Seat" then
 			return object
 		end
-		return child(object, "HumanoidRootPart") or child(object, "CharacterPart") or object.PrimaryPart or child(object, "Head")
+		local part = child(object, "HumanoidRootPart") or child(object, "CharacterPart")
+		if part then return part end
+		local primary = object.PrimaryPart
+		local primaryClass = primary and primary.ClassName
+		if primaryClass ~= "Part" and primaryClass ~= "MeshPart" and primaryClass ~= "UnionOperation" and primaryClass ~= "Seat" then primary = nil end
+		return primary
+			or child(object, "Hitbox") or child(object, "PromptPart") or child(object, "Head") or child(object, "Primary")
 	end
 
 	local function promptPart(object)
@@ -8650,7 +9275,7 @@ _G.StandOutParts.Bounties = function(ctx)
 				break
 			end
 			id = id or ctx.attr(current, "BountyId") or ctx.attr(current, "Bounty")
-			leader = leader or ctx.attr(current, "BountyLeaderId")
+			leader = leader or ctx.attr(current, "BountyLeaderId") or ctx.attr(current, "BountyOwnerId")
 			if not leader and current.Name == "Party_" .. tostring(state.leader) then
 				local bountyWorld = child(world, "BountyWorld")
 				if bountyWorld and current.Parent and current.Parent.Address == bountyWorld.Address then leader = state.leader end
@@ -8666,6 +9291,55 @@ _G.StandOutParts.Bounties = function(ctx)
 	local function isOwned(object)
 		local id, leader = getOwner(object)
 		return ownerMatches(id, leader, state.active, state.leader)
+	end
+
+	local function targetObjectAllowed(object)
+		if not object or not object.Parent then return false end
+		local id, leader = getOwner(object)
+		if id or leader then return ownerMatches(id, leader, state.active, state.leader) end
+		local current, npc = object, nil
+		local npcFolder, playerFolder = child(world, "NPCs"), child(world, "Players")
+		for _ = 1, 8 do
+			if not current then break end
+			if playerFolder and current.Address == playerFolder.Address then return false end
+			if npcFolder and current.Parent and current.Parent.Address == npcFolder.Address then npc = current; break end
+			current = current.Parent
+		end
+		local _, index = parseId(state.active)
+		if npc and index == 13 then
+			local darby = child(npcFolder, "Darby")
+			local root = child(darby, "HumanoidRootPart")
+			return state.leader == player.UserId and darby ~= nil and npc.Address == darby.Address and root ~= nil
+				and (object.Address == darby.Address or object.Address == root.Address or object.Parent.Address == root.Address)
+		end
+		return not npc or state.talkNPC ~= nil and (canonicalNPC(npc.Name) == state.talkNPC
+			or canonicalNPC(ctx.attr(npc, "Config")) == state.talkNPC)
+	end
+
+	local function resolveTargetPath(path)
+		if type(path) ~= "string" then return nil end
+		local pieces = {}
+		for piece in path:gsub("/", "."):gmatch("[^%.]+") do pieces[#pieces + 1] = piece end
+		if normalized(pieces[1]) == "game" and (normalized(pieces[2]) == "workspace" or pieces[2] == world.Name) then table.remove(pieces, 1) end
+		local current = game.Workspace
+		if normalized(pieces[1]) == "workspace" then
+			table.remove(pieces, 1)
+		elseif pieces[1] ~= world.Name then
+			current = world
+		end
+		for _, piece in ipairs(pieces) do current = child(current, piece); if not current then return nil end end
+		return targetObjectAllowed(current) and current or nil
+	end
+
+	local function relatedToTarget(object)
+		local target = state.targetObject
+		if not target then return not state.targetMissing end
+		for _ = 1, 12 do
+			if not object then break end
+			if object.Address == target.Address then return true end
+			object = object.Parent
+		end
+		return false
 	end
 
 	local function promptAllowed(prompt, marker)
@@ -8689,26 +9363,94 @@ _G.StandOutParts.Bounties = function(ctx)
 		local part = promptPart(prompt)
 		local nearby = validVector(marker) and part and validVector(part.Position) and (part.Position - marker).Magnitude < 14
 		local _, index = parseId(state.active)
+		local jewelry = jewelryNPC(state.progress, state.active)
+		if index == 10 and state.phase == "hospital" and prompt.Name == "ProximityPrompt" then
+			local folder = child(world, "NPCs")
+			local nurse = child(folder, "Hospital Nurse")
+			local root = child(nurse, "HumanoidRootPart")
+			if state.leader ~= player.UserId or prompt.ClassName ~= "ProximityPrompt" or not nurse or not nurse.Parent
+				or nurse.Parent.Address ~= folder.Address or not root or not root.Parent or root.Parent.Address ~= nurse.Address
+				or prompt.Parent.Address ~= root.Address or not validVector(state.targetMarker) or not validVector(root.Position)
+				or (root.Position - state.targetMarker).Magnitude > 8 or not relatedToTarget(prompt) then return false end
+			for _, object in ipairs({prompt, root, nurse}) do
+				local bounty, partyLeader = getOwner(object)
+				local carrier, owner = ctx.attr(object, "BountyDeliveryCarrierId"), ctx.attr(object, "StoryPromptOwnerId")
+				if bounty and bounty ~= state.active or partyLeader and partyLeader ~= state.leader
+					or carrier and tonumber(carrier) ~= player.UserId or owner and tonumber(owner) ~= player.UserId then return false end
+			end
+			return true
+		end
+		if jewelry and prompt.ClassName == "ClickDetector" and prompt.Name == "ClickDetector" then
+			local folder = child(world, "NPCs")
+			local actor = child(folder, jewelry)
+			local root = child(actor, "HumanoidRootPart")
+			if state.leader ~= player.UserId or not actor or not actor.Parent or actor.Parent.Address ~= folder.Address
+				or not root or not root.Parent or root.Parent.Address ~= actor.Address or prompt.Parent.Address ~= actor.Address
+				or not validVector(state.targetMarker) or not validVector(root.Position) or (root.Position - state.targetMarker).Magnitude > 8
+				or state.targetObject and state.targetObject.Address ~= actor.Address and state.targetObject.Address ~= root.Address and not relatedToTarget(prompt) then return false end
+			for _, object in ipairs({ prompt, root, actor }) do
+				local bounty, partyLeader = getOwner(object)
+				local carrier, owner = ctx.attr(object, "BountyDeliveryCarrierId"), ctx.attr(object, "StoryPromptOwnerId")
+				if bounty and bounty ~= state.active or partyLeader and partyLeader ~= state.leader
+					or carrier and tonumber(carrier) ~= player.UserId or owner and tonumber(owner) ~= player.UserId then return false end
+			end
+			return true
+		end
+		if index == 13 and prompt.Name == "StandStorageOpen" then
+			local darby = child(child(world, "NPCs"), "Darby")
+			local root = child(darby, "HumanoidRootPart")
+			if state.leader ~= player.UserId or prompt.ClassName ~= "ProximityPrompt"
+				or not root or not root.Parent or root.Parent.Address ~= darby.Address or prompt.Parent.Address ~= root.Address
+				or not validVector(marker) or not validVector(root.Position) or (root.Position - marker).Magnitude > 8
+				or not relatedToTarget(prompt) or ctx.attr(prompt, "ServerInteraction") ~= true
+				or ctx.attr(prompt, "InteractionKeybind") ~= "Interactables" then return false end
+			for _, object in ipairs({ prompt, root, darby }) do
+				local bounty, partyLeader = getOwner(object)
+				local carrier, owner = ctx.attr(object, "BountyDeliveryCarrierId"), ctx.attr(object, "StoryPromptOwnerId")
+				if bounty and bounty ~= state.active or partyLeader and partyLeader ~= state.leader
+					or carrier and tonumber(carrier) ~= player.UserId or owner and tonumber(owner) ~= player.UserId then return false end
+			end
+			return true
+		end
 		local stationFolder = index == 10 and "ArmWrestlingTables" or index == 13 and "GoFishTables"
 		if stationFolder then
-			local container, ancestor = child(world, stationFolder), part
+			local container, ancestor, station = child(world, stationFolder), prompt, nil
 			for _ = 1, 8 do
 				if not ancestor or not container then break end
+				local bounty = ctx.attr(ancestor, "BountyId") or ctx.attr(ancestor, "Bounty")
+				local partyLeader, partyOwner = ctx.attr(ancestor, "BountyLeaderId"), ctx.attr(ancestor, "BountyOwnerId")
+				if bounty and tostring(bounty) ~= state.active or partyLeader and tonumber(partyLeader) ~= state.leader
+					or partyOwner and tonumber(partyOwner) ~= state.leader then return false end
 				if ancestor.Address == container.Address then
 					local party = child(child(world, "BountyWorld"), "Party_" .. tostring(state.leader))
 					local owned = false
 					for _, scene in ipairs(party and party:GetChildren() or {}) do
 						if isOwned(scene) then owned = true; break end
 					end
-					return owned and (id == nil or id == state.active) and leader == state.leader and validVector(marker) and part and validVector(part.Position)
+					local users = ctx.attr(prompt, "InteractionUserIds")
+					local reserved = index == 10 and state.phase == "table" and state.leader == player.UserId and leader == nil
+						and prompt.ClassName == "ProximityPrompt" and station and station.ClassName == "Model"
+						and tonumber(ctx.attr(station, "ReservedOwner")) == player.UserId and type(users) == "string"
+						and users:find("," .. tostring(player.UserId) .. ",", 1, true) ~= nil
+					return owned and (id == nil or id == state.active) and (leader == state.leader or reserved) and validVector(marker) and part and validVector(part.Position)
 						and (part.Position - marker).Magnitude <= 8
 						and (index == 10 and prompt.Name == "ArmWrestlingSit"
 							or index == 13 and (prompt.Name == "GoFishOwnedSeat" or prompt.Name == "PlayerGoFish"))
 				end
-				ancestor = ancestor.Parent
+				station, ancestor = ancestor, ancestor.Parent
 			end
 		end
-		if id then return ownerMatches(id, leader, state.active, state.leader) end
+		if id then return ownerMatches(id, leader, state.active, state.leader) and relatedToTarget(prompt)
+			and (state.targetObject ~= nil or marker == nil or nearby) end
+		local classic = index and index <= 3 and prompt.ClassName == "ProximityPrompt"
+		local delivery = classic and (prompt.Name == "BountyDeliverPickup_" .. tostring(state.leader) or prompt.Name == "BountyDeliverDrop_" .. tostring(state.leader))
+		if classic and (prompt.Name == "BountyPrompt_" .. tostring(state.leader) or delivery) then
+			local step = type(state.progress) == "table" and state.progress.StepIndex
+			return leader == state.leader and finite(step) and step >= 1 and step % 1 == 0
+				and (not delivery or type(state.progress.HasItem) == "boolean" and prompt.Name == (state.progress.HasItem and "BountyDeliverDrop_" or "BountyDeliverPickup_") .. tostring(state.leader))
+				and validVector(state.targetMarker) and part and validVector(part.Position) and (part.Position - state.targetMarker).Magnitude <= 8
+				and relatedToTarget(prompt) and ctx.attr(prompt, "InteractionKeybind") == "Interactables"
+		end
 		if state.karaokeObjective then
 			local stations, model = child(world, "KaraokeStations"), part and part.Parent
 			local party = child(child(world, "BountyWorld"), "Party_" .. tostring(state.leader))
@@ -8733,11 +9475,18 @@ _G.StandOutParts.Bounties = function(ctx)
 	end
 
 	local function goFishRoot(gui)
+		cached.storageAction = nil
 		local _, index = parseId(state.active)
 		if not gui or index ~= 13 or ctx.attr(player, "QTEInputLocked") ~= true then return nil end
-		local selected
+		local selected, storageAction, storageAmbiguous
 		for _, root in ipairs(gui:GetChildren()) do
 			if root.ClassName == "ScreenGui" and root.Parent and root.Parent.Address == gui.Address then
+				local panel = child(root, "Panel", true)
+				local title, action = child(panel, "Title"), child(panel, "Action")
+				if title and title.ClassName == "TextLabel" and title.Text == "STAND STORAGE"
+					and action and action.ClassName == "TextButton" then
+					if storageAction then storageAmbiguous = true else storageAction = action end
+				end
 				local speech = child(root, "Speech", true)
 				local stage = speech and speech.Parent
 				local speaker, line = child(speech, "Speaker"), child(speech, "Line")
@@ -8745,20 +9494,22 @@ _G.StandOutParts.Bounties = function(ctx)
 				local board = hand and hand.Parent
 				local result, leave = child(stage, "Result"), child(stage, "LeaveTable")
 				local body, primary = child(result, "Body"), child(result, "Primary")
-				if speech and speech.ClassName == "Frame" and stage and stage.ClassName == "Frame"
+				if speech and (speech.ClassName == "Frame" or speech.ClassName == "ImageLabel") and stage and stage.ClassName == "Frame"
 					and stage.Parent and stage.Parent.Address == root.Address
 					and speaker and speaker.ClassName == "TextLabel" and speaker.Text == "D'ARBY"
 					and line and line.ClassName == "TextLabel"
-					and hand and hand.ClassName == "Frame" and darby and darby.ClassName == "Frame"
+					and hand and (hand.ClassName == "Frame" or hand.ClassName == "ImageLabel")
+					and darby and (darby.ClassName == "Frame" or darby.ClassName == "ImageLabel")
 					and board and board.ClassName == "Frame" and board.Parent and board.Parent.Address == stage.Address
 					and darby.Parent and darby.Parent.Address == board.Address
-					and result and result.ClassName == "Frame" and body and body.ClassName == "TextLabel"
+					and result and (result.ClassName == "Frame" or result.ClassName == "ImageLabel") and body and body.ClassName == "TextLabel"
 					and primary and primary.ClassName == "TextButton" and leave and leave.ClassName == "TextButton" then
 					if selected then return nil end
 					selected = root
 				end
 			end
 		end
+		cached.storageAction = not storageAmbiguous and storageAction or nil
 		return selected
 	end
 
@@ -8783,26 +9534,32 @@ _G.StandOutParts.Bounties = function(ctx)
 			releaseKeys()
 			karaoke = { session = session, notes = {}, pressed = {}, held = {}, lastCollect = -math.huge }
 		end
-		if ctx.now() - karaoke.lastCollect < 0.12 then return end
-		karaoke.lastCollect = ctx.now()
-		karaoke.selection = child(cached.gui, "SongSelection", true)
-		if karaoke.selection then
-			karaoke.song = karaokeSong(state.progress, cached.objective, state.active) or karaoke.song
-			karaoke.choice = karaokeButton(karaoke.selection, karaoke.song)
-			karaoke.notes, karaoke.error = {}, nil
-			return
+		local owner = karaoke
+		if ctx.now() - owner.lastCollect < (owner.lane and 0.015 or 0.12) then return end
+		owner.lastCollect = ctx.now()
+		local lane = owner.lane
+		if not lane or not lane.Parent then
+			owner.selection = child(cached.gui, "SongSelection", true)
+			if karaoke ~= owner then return end
+			if owner.selection then
+				owner.song = karaokeSong(state.progress, cached.objective, state.active) or owner.song
+				owner.choice = karaokeButton(owner.selection, owner.song)
+				owner.notes, owner.error = {}, nil
+				return
+			end
+			owner.choice = nil
+			local panel = child(cached.gui, "RhythmPanel", true)
+			local receptor = child(panel, "X", true)
+			lane = receptor and receptor.Parent
+			owner.lane = lane
 		end
-		karaoke.choice = nil
-		local panel = child(cached.gui, "RhythmPanel", true)
-		local receptor = child(panel, "X", true)
-		local lane = receptor and receptor.Parent
 		if not lane then
-			karaoke.notes = {}
-			karaoke.error = "Usagi needs the visible karaoke lane"
+			owner.notes = {}
+			owner.error = "Usagi needs the visible karaoke lane"
 			return
 		end
 		local notes = {}
-		karaoke.error = nil
+		owner.error = nil
 		for _, object in ipairs(lane:GetChildren()) do
 			local index = tonumber(object.Name:match("^Note(%d+)$"))
 			if index then
@@ -8832,25 +9589,31 @@ _G.StandOutParts.Bounties = function(ctx)
 						tail = child(lane, "Hold" .. index),
 					}
 				else
-					karaoke.error = "Usagi needs readable note keys and receptor positions"
+					owner.error = "Usagi needs readable note keys and receptor positions"
 				end
 			end
 		end
-		karaoke.notes = notes
+		if karaoke == owner then owner.notes = notes end
 	end
 
 	local function karaokeStep()
 		if not karaoke then say("Usagi needs its native karaoke session", "Usagi"); return end
-		if not karaoke.selection then
-			say(karaoke.error or "Usagi: following the native notes and holds", "Usagi")
+		local owner = karaoke
+		if not owner.selection then
+			say(owner.error or "Usagi: following the native notes and holds", "Usagi")
 			return
 		end
-		if not karaoke.song then say("Usagi needs the bounty's requested song title", "Usagi"); return end
-		if karaoke.submitted then say("Usagi: waiting for the selected performance to start", "Usagi"); return end
-		local choice, now = karaoke.choice, ctx.now()
+		if not owner.song then say("Usagi needs the bounty's requested song title", "Usagi"); return end
+		if incidents and incidents.KaraokeSubmitted then
+			local submitted = incidents.KaraokeSubmitted(owner, state) == true
+			if karaoke ~= owner then return end
+			owner.submitted = submitted
+		end
+		if owner.submitted then say("Usagi: waiting for the selected performance to start", "Usagi"); return end
+		local choice, now = owner.choice, ctx.now()
 		if not choice or not choice.Parent then say("Usagi needs the requested song in its native selection menu", "Usagi"); return end
-		if now < (karaoke.nextClick or 0) then return end
-		karaoke.nextClick = now + 0.3
+		if now < (owner.nextClick or 0) then return end
+		owner.nextClick = now + 0.3
 		local point, viewport = choice.AbsolutePosition, game.Workspace.Camera.ViewportSize
 		if not point or not finite(point.X) or not finite(point.Y) or point.X <= 0 then
 			say("Usagi needs readable native song button positions", "Usagi"); return
@@ -8861,17 +9624,20 @@ _G.StandOutParts.Bounties = function(ctx)
 		local bottom = viewport.Y / 2 + height * scale / 2 - 11 * scale
 		if point.Y < top or point.Y + 30 * scale > bottom then
 			if ctx.mouseMove(viewport.X / 2, (top + bottom) / 2) then mousescroll(point.Y < top and 4 or -4) end
-			say("Usagi: scrolling to " .. karaoke.song, "Usagi")
+			say("Usagi: scrolling to " .. owner.song, "Usagi")
 			return
 		end
+		if ctx.attr(player, "KaraokeInputLocked") ~= owner.session or karaoke ~= owner then return end
 		if ctx.click(choice) then
-			karaoke.submitted = true
-			say("Usagi: selecting " .. karaoke.song, "Usagi")
+			owner.nextClick = now + 0.9
+			say("Usagi: selecting " .. owner.song, "Usagi")
 		end
 	end
 
 	local function scanWorld()
 		prompts, fighters, scenes = {}, {}, {}
+		state.targetObject = resolveTargetPath(state.targetPath)
+		local namedTarget, namedAmbiguous
 		cached.petyr = child(child(world, "NPCs"), "Petyr")
 		cached.petyrPart = partOf(cached.petyr)
 		cached.petyrPrompt = child(cached.petyr, "ProximityPrompt") or child(cached.petyr, "ClickDetector")
@@ -8879,10 +9645,10 @@ _G.StandOutParts.Bounties = function(ctx)
 		if not state.active then
 			return
 		end
-		local seen = {}
+		local seen, fighterSeen, sceneSeen = {}, {}, {}
 		local function directlyOwned(model)
 			local id = ctx.attr(model, "BountyId") or ctx.attr(model, "Bounty")
-			local leader = ctx.attr(model, "BountyLeaderId")
+			local leader = ctx.attr(model, "BountyLeaderId") or ctx.attr(model, "BountyOwnerId")
 			return id ~= nil and ownerMatches(tostring(id), tonumber(leader), state.active, state.leader),
 				id ~= nil or leader ~= nil
 		end
@@ -8905,63 +9671,93 @@ _G.StandOutParts.Bounties = function(ctx)
 				or (type(config) == "string" and canonicalNPC(config) == state.talkNPC)
 		end
 		local function addPrompt(prompt)
-			if not promptAllowed(prompt, state.marker) then
-				return
-			end
 			local address = prompt.Address
 			if address and not seen[address] then
 				seen[address] = true
 				prompts[#prompts + 1] = { object = prompt, part = promptPart(prompt) }
 			end
 		end
-		local function scanModel(model, combatFolder, ownership)
+		local function matchTargetName(object)
+			if state.targetName and object.Name == state.targetName and targetObjectAllowed(object) then
+				if namedTarget and namedTarget.Address ~= object.Address then namedAmbiguous = true end
+				namedTarget = object
+			end
+		end
+		local function scanModel(model, combatFolder, ownership, nestedCombat)
 			local owned = ownership
 			if owned == nil then
 				owned = isOwned(model)
 			end
-			if model.Name:match("^Incident_") and owned then
+			matchTargetName(model)
+			if model.Name:match("^Incident_") and owned and not sceneSeen[model.Address] then
+				sceneSeen[model.Address] = true
 				scenes[#scenes + 1] = model
 			end
-			if owned and combatFolder and model.ClassName == "Model" then
+			local scaledTier = ctx.attr(model, "BountyScaledTier")
+			local partyEnemy = finite(scaledTier) and scaledTier >= 1 and scaledTier % 1 == 0
+			if owned and combatFolder and (not nestedCombat or partyEnemy) and model.ClassName == "Model" and not fighterSeen[model.Address] then
 				local hum, root = child(model, "Humanoid"), child(model, "HumanoidRootPart")
 				if hum and root then
+					fighterSeen[model.Address] = true
 					fighters[#fighters + 1] = { object = model, humanoid = hum, part = root }
 				end
 			end
 			if owned or not combatFolder then
+				local storyActor = model.Parent and model.Parent.Name == "StoryActors"
 				for _, prompt in ipairs(ctx.findPrompts(model)) do
-					addPrompt(prompt)
+					if not storyActor or ctx.attr(prompt, "StoryPromptAvailable") == true then addPrompt(prompt) end
+				end
+			end
+			if nestedCombat or state.targetName then
+				for _, object in ipairs(model:GetDescendants()) do
+					matchTargetName(object)
+					local enemyTier = nestedCombat and object.ClassName == "Model" and ctx.attr(object, "BountyScaledTier") or nil
+					if nestedCombat and object.ClassName == "Model" and (ctx.attr(object, "BountyId") or ctx.attr(object, "Bounty")) and isOwned(object)
+						and finite(enemyTier) and enemyTier >= 1 and enemyTier % 1 == 0 then
+						scanModel(object, true, true, false)
+					end
 				end
 			end
 		end
-		for _, name in ipairs({ "NPCs", "Players", "QuestInteractables", "KaraokeStations", "ArmWrestlingTables", "GoFishTables" }) do
+		for _, name in ipairs({ "NPCs", "Players", "QuestInteractables", "StoryActors", "KaraokeStations", "ArmWrestlingTables", "GoFishTables" }) do
 			local container = child(world, name)
 			if container then
 				for _, model in ipairs(container:GetChildren()) do
 					local owned, hasOwner = directlyOwned(model)
 					local _, index = parseId(state.active)
 					local station = name == "ArmWrestlingTables" and index == 10 or name == "GoFishTables" and index == 13
-					if owned or station or (not hasOwner and neutralTarget(model, name) and nearMarker(model)) then
+					local named = state.targetName and model.Name == state.targetName and targetObjectAllowed(model)
+					if owned or station or name ~= "StoryActors" and (not hasOwner and neutralTarget(model, name) and (nearMarker(model) or named)) then
 						scanModel(model, name == "Players", owned)
 					end
 				end
 			end
 		end
+		local _, index = parseId(state.active)
+		local deliveries = index and index <= 3 and child(child(world, "Map"), "Deliveries")
+		for _, model in ipairs(deliveries and deliveries:GetChildren() or {}) do
+			if nearMarker(model) then scanModel(model, false) end
+		end
 		local bountyWorld = child(world, "BountyWorld")
 		local party = child(bountyWorld, "Party_" .. tostring(state.leader))
 		if party then
 			for _, model in ipairs(party:GetChildren()) do
-				if isOwned(model) then
-					scanModel(model, false, true)
-				end
+				scanModel(model, true, nil, true)
 			end
 		end
 
 		for _, model in ipairs(world:GetChildren()) do
 			if model.Name:match("^Incident_") and isOwned(model) then
-				scanModel(model, false, true)
+				scanModel(model, true, true, true)
 			end
 		end
+		local mapScene = families[index] and child(child(world, "Map"), "Incident_" .. families[index])
+		if mapScene and isOwned(mapScene) then scanModel(mapScene, true, true, true) end
+		if not state.targetObject and not namedAmbiguous then state.targetObject = namedTarget end
+		local targetPart = partOf(state.targetObject)
+		if not state.targetMarker and targetPart and validVector(targetPart.Position) then state.marker = targetPart.Position end
+		state.targetMissing = (state.targetPath ~= nil or state.targetName ~= nil) and state.targetObject == nil and state.marker == nil
+		state.lastWorld = ctx.now()
 	end
 
 	local function collectTea(owner)
@@ -8978,7 +9774,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		tea.viewObject = child(child(cached.tabletop, "Footer", true), "Reset")
 		tea.view = textOf(tea.viewObject)
 		tea.target = child(scene, "DropTarget")
-		tea.props, tea.fills, tea.bands = {}, {}, {}
+		tea.props, tea.pivots, tea.fills, tea.bands = {}, {}, {}, {}
 		if not scene then
 			return
 		end
@@ -8988,13 +9784,20 @@ _G.StandOutParts.Bounties = function(ctx)
 			end
 			if object.ClassName == "Model" then
 				local bounds = child(object, "GrabBounds")
-				if bounds then
-					tea.props[normalized(object.Name)] = bounds
-				end
+				local pickup
 				for _, part in ipairs(object:GetDescendants()) do
+					if not pickup and (part.ClassName == "Part" or part.ClassName == "MeshPart" or part.ClassName == "UnionOperation")
+						and finite(part.Transparency) and part.Transparency < 0.95 and part.CanQuery ~= false
+						and validVector(part.Position) and not ctx.attr(part, "TabletopGrabHandle") then pickup = part end
 					if ctx.attr(part, "TabletopFill") then
 						tea.fills[#tea.fills + 1] = part
 					end
+				end
+				if bounds then
+					local primary = object.PrimaryPart
+					if not primary or (primary.ClassName ~= "Part" and primary.ClassName ~= "MeshPart" and primary.ClassName ~= "UnionOperation")
+						or not validVector(primary.Position) then primary = bounds end
+					tea.props[normalized(object.Name)], tea.pivots[normalized(object.Name)] = pickup or bounds, primary
 				end
 			end
 		end
@@ -9006,14 +9809,24 @@ _G.StandOutParts.Bounties = function(ctx)
 			return
 		end
 		state.lastSense = now
-		refreshUI()
 		local data = child(player, "Data")
 		local stats = child(data, "Stats")
 		local active = ctx.decode(child(stats, "ActiveBounties"))
 		local newId, readable = activeId(active)
 		state.readable = readable
+		local partyLeader = child(child(data, "Party"), "Leader")
+		local leader = partyLeader and tonumber(partyLeader.Value) or 0
+		if not leader or leader <= 0 then leader = player.UserId end
+		if readable and newId == state.active and state.armSession and not state.claim and leader == player.UserId
+			and leader == state.leader and ctx.attr(player.Character, "ArmWrestlingSession") == state.armSession then
+			return
+		end
+		refreshUI()
 		local rotationValue = child(stats, "BountyRotationKey")
-		local rotation = rotationValue and tonumber(rotationValue.Value) or (math.floor(now / 3600) + 1000000000)
+		local epoch = type(ctx.utcNow) == "function" and ctx.utcNow()
+		local rotation = type(epoch) == "number" and epoch > 0 and epoch < math.huge
+			and (math.floor(epoch / 3600) + 1000000000) or rotationValue and tonumber(rotationValue.Value)
+		if type(rotation) ~= "number" or rotation ~= rotation or rotation < 0 or rotation % 1 ~= 0 then state.readable = false; return end
 		if state.rotation ~= rotation then
 			state.rotation, state.completed, state.blockedUntil = rotation, {}, 0
 		end
@@ -9023,13 +9836,11 @@ _G.StandOutParts.Bounties = function(ctx)
 			state.active, state.menuStage, busy = newId, nil, false
 			state.lastWorld = -math.huge
 		end
-		local partyLeader = child(child(data, "Party"), "Leader")
-		state.leader = partyLeader and tonumber(partyLeader.Value) or 0
-		if not state.leader or state.leader <= 0 then
-			state.leader = player.UserId
-		end
+		state.leader = leader
 		local progress = ctx.decode(child(stats, "BountyProgress"))
 		state.progress = type(progress) == "table" and progress[state.active] or nil
+		state.stepIndex = type(state.progress) == "table" and state.progress.StepIndex or nil
+		state.phase = type(state.progress) == "table" and state.progress.IncidentPhase or nil
 		state.karaokeObjective = karaokeGoal(state.progress, cached.objective, state.active)
 		state.talkNPC = not state.karaokeObjective and talkTarget(state.progress, cached.objective, state.active) or nil
 		state.claim = state.active
@@ -9045,21 +9856,31 @@ _G.StandOutParts.Bounties = function(ctx)
 				end
 			end
 		end
-		state.marker = markerVector(ctx.attr(player, "VisibleBountyTrackerPosition"))
+		state.targetMarker, state.targetPath, state.targetName = progressTarget(state.progress)
+		state.marker = state.targetMarker or markerVector(ctx.attr(player, "VisibleBountyTrackerPosition"))
 		if not validVector(state.marker) then
 			state.marker = nil
 		end
-		state.karaokeSession = ctx.attr(player, "KaraokeInputLocked")
 		local _, activeFamily = parseId(state.active)
+		local karaokeSession = ctx.attr(player, "KaraokeInputLocked")
+		state.karaokeSession = activeFamily == 12 and not state.claim and type(karaokeSession) == "string" and karaokeSession ~= "" and karaokeSession or nil
 		local teaOwner = ctx.attr(player, "TabletopInputOwner")
 		state.teaOwner = activeFamily == 14 and type(teaOwner) == "string" and teaOwner ~= "" and teaOwner or nil
 		state.jewelry = ctx.attr(player, "JewelryInspecting") == true
 		local character = player.Character
-		state.armSession = character and ctx.attr(character, "ArmWrestlingSession")
+		local armSession = character and ctx.attr(character, "ArmWrestlingSession")
+		state.armSession = activeFamily == 10 and not state.claim and type(armSession) == "string" and armSession ~= "" and armSession or nil
+		if state.armSession and state.leader == player.UserId then
+			if state.pacoSession ~= state.armSession then state.pacoExitAt = nil end
+			state.pacoSession, state.pacoCharacter = state.armSession, character.Address
+		end
 		state.dialogue = ctx.attr(player, "DialogueInputLocked") == true
 		state.inputLock = ctx.attr(player, "QTEInputLocked") == true
 		local observed = tostring(state.active) .. "|" .. cached.objective .. "|" .. tostring(state.claim)
+			.. "|" .. tostring(state.stepIndex) .. "|" .. tostring(state.phase) .. "|" .. tostring(state.targetPath) .. "|" .. tostring(state.targetName)
 		if observed ~= lastObserved then
+			if state.interactionOwned and ctx.cancelInteraction then ctx.cancelInteraction() end
+			state.interactionOwned = false
 			state.progressAt, state.blockedUntil, state.nextAction, state.lastWorld = now, 0, 0, -math.huge
 			lastObserved = observed
 		end
@@ -9068,9 +9889,10 @@ _G.StandOutParts.Bounties = function(ctx)
 		end
 		local _, index = parseId(state.active)
 		state.verityBox = false
-		if index == 8 and normalized(label(cached.choices, "Title")) == "askberity" then
+		local questionTitle = normalized(label(cached.choices, "Title"))
+		if index == 8 and (questionTitle == "askberity" or questionTitle == "yourpersonalhelperfriend" or questionTitle == "hubertsmissingpackage") then
 			local progress = state.progress
-			state.verityBox = type(progress) == "table" and progress.IncidentPhase == "box" and type(progress.IncidentToken) == "string" and progress.IncidentToken ~= ""
+			state.verityBox = type(progress) == "table" and (progress.IncidentPhase == "box" or progress.IncidentPhase == "helper" or progress.IncidentPhase == "question") and type(progress.IncidentToken) == "string" and progress.IncidentToken ~= ""
 			for _, scene in ipairs(scenes) do
 				if scene.Name == "Incident_Verity" and isOwned(scene) then state.verityBox = true; break end
 			end
@@ -9087,6 +9909,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			releaseKeys()
 			tea = nil
 		end
+		state.lastSense = ctx.now()
 	end
 
 	local function nearestPrompt()
@@ -9124,8 +9947,17 @@ _G.StandOutParts.Bounties = function(ctx)
 				and isOwned(candidate.object)
 				and candidate.humanoid.Health > 0
 				and validVector(candidate.part.Position)
+				and not state.targetMissing
 			then
-				local d = (candidate.part.Position - root.Position).Magnitude
+				local currentTarget, targetHumanoid = state.targetObject, nil
+				for _ = 1, 8 do
+					if not currentTarget then break end
+					targetHumanoid = child(currentTarget, "Humanoid")
+					if targetHumanoid then break end
+					currentTarget = currentTarget.Parent
+				end
+				local d = (candidate.part.Position - (state.marker or root.Position)).Magnitude
+				if targetHumanoid and candidate.object.Address ~= currentTarget.Address then d = math.huge end
 				if d < distance then
 					target, distance = candidate.object, d
 				end
@@ -9139,7 +9971,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		local definition = incidentDialogs[index]
 		if not definition or state.claim then return false end
 		local party = child(child(world, "BountyWorld"), "Party_" .. tostring(state.leader))
-		local scene = child(party, definition.scene)
+		local scene = child(party, definition.scene) or child(child(world, "Map"), definition.scene) or child(world, definition.scene)
 		local holder = child(child(cached.gui, "Dialogue"), "Holder")
 		if not scene or not isOwned(scene) or canonicalNPC(label(holder, "Title")) ~= definition.npc then return false end
 		local choices, selected, count = child(holder, "Choices"), nil, 0
@@ -9194,7 +10026,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			if not finite(leader) or (leader > 0 and leader ~= player.UserId and ctx.attr(player, "PersonalBountyReward") ~= state.active) then return false end
 		end
 		local claims = ctx.decode(child(stats, "BountyCompletions"))
-		local key = tier == 1 and tostring(index) or tostring(index) .. ":" .. tostring(tier)
+		local key = tostring(index)
 		local receipt = type(claims) == "table" and claims[key]
 		if finite(receipt) and receipt % 1 == 0 and receipt >= rotation then
 			state.menuStage, state.nextAction = nil, now + 0.1
@@ -9237,7 +10069,7 @@ _G.StandOutParts.Bounties = function(ctx)
 				say("Petyr needs a readable bounty prompt")
 				return
 			end
-			if ctx.interact(cached.petyrPrompt) == "blocked" then return end
+			if ctx.interact(cached.petyrPrompt) ~= "triggered" then return end
 			state.interactionOwned = true
 			state.tierClicks = 0
 			state.menuStage, state.menuUntil, state.nextAction = "opening", now + 12, now + 0.1
@@ -9294,7 +10126,15 @@ _G.StandOutParts.Bounties = function(ctx)
 			tier = 1
 		end
 		local indices, candidate, blocked = available(state.rotation), nil, ctx.getSetting("BlockedBounties")
-		local anyBlocked = false
+		for slot, index in ipairs(indices) do
+			local title = label(child(objectives, "Bounty_" .. slot), "Title"):gsub(" | COMPLETE$", "")
+			if title ~= bountyNames[index] and (index ~= 13 or title ~= "D'ARBY'S REMATCH") then
+				state.nextAction = now + 0.2
+				say("Waiting for the current native bounty board")
+				return
+			end
+		end
+		local anyBlocked, unreadable = false, false
 		for slot, index in ipairs(indices) do
 			local card = child(objectives, "Bounty_" .. slot)
 			local title, description = label(card, "Title"), label(card, "Desc")
@@ -9310,11 +10150,17 @@ _G.StandOutParts.Bounties = function(ctx)
 			end
 			local excluded = type(blocked) == "table" and blocked[bountyNames[index]] == true
 			anyBlocked = anyBlocked or excluded
+			if not excluded and not state.completed[index] and (not card or title == "") then unreadable = true end
 			if not candidate and card and title ~= "" and not state.completed[index] and not excluded then
 				candidate = { card = card, index = index, slot = slot }
 			end
 		end
 		if not candidate then
+			if unreadable then
+				state.nextAction = now + 0.2
+				say("Waiting for the native bounty cards")
+				return
+			end
 			ctx.click(child(menu, "EXIT"))
 			state.menuStage, busy, state.allDone = nil, false, state.rotation
 			say(anyBlocked and "All offered bounties blocked or completed; waiting for refresh" or "All offered bounties completed; waiting for refresh")
@@ -9328,10 +10174,13 @@ _G.StandOutParts.Bounties = function(ctx)
 			state.blockedUntil = now + 2
 			return
 		end
-		if beginText ~= "Begin" then
+		if beginText ~= "Begin" and beginText ~= "COMPLETE" then
 			say("Petyr needs an available Begin button")
-			state.menuStage, busy = nil, false
-			state.blockedUntil = now + 8
+			state.nextAction = now + 0.1
+			if now > state.menuUntil then
+				state.menuStage, busy = nil, false
+				state.blockedUntil = now + 8
+			end
 			return
 		end
 		game.ReplicatedStorage.Remotes.Bounty:FireServer(
@@ -9352,8 +10201,10 @@ _G.StandOutParts.Bounties = function(ctx)
 				end
 				releaseKeys()
 				ctx.releaseAll()
-				if (root.Position - spot.Position).Magnitude > 2.5 and ctx.now() >= (state.stillMoveAt or 0) then
-					ctx.move(spot.Position)
+				local point = validVector(state.targetMarker) and state.targetMarker or spot.Position
+				local delta = root.Position - point
+				if delta.X ^ 2 + delta.Z ^ 2 > 1 and ctx.now() >= (state.stillMoveAt or 0) then
+					ctx.move(point + Vector3.new(0, 3, 0))
 					state.stillMoveAt = ctx.now() + 2
 				end
 				busy = true
@@ -9366,52 +10217,10 @@ _G.StandOutParts.Bounties = function(ctx)
 	end
 
 	local function goFishStep()
-		local line, now = cached.goFishLine, ctx.now()
-		busy = true
-		if line:find("click the deck to draw", 1, true) then
-			ctx.tap(32)
-			state.nextAction = now + 0.9
-			say("Go Fish: drawing from the deck", "GoFish")
-			return
-		end
-		if line:match("^Click your .- cards to hand them over%.$") then
-			ctx.tap(32)
-			state.nextAction = now + 0.9
-			say("Go Fish: giving the requested cards", "GoFish")
-			return
-		end
-		if line == "Your turn, so click a card to ask." then
-			local hand = child(cached.goFish, "Hand", true)
-			local best, bestCount = nil, 0
-			if hand then
-				for _, object in ipairs(hand:GetDescendants()) do
-					if object.ClassName == "TextButton" then
-						local count = tonumber(label(object, "Count"):match("x(%d+)"))
-						if count and count > bestCount then
-							best, bestCount = object, count
-						end
-					end
-				end
-			end
-			if best then
-				if ctx.click(best) then state.nextAction = now + 0.9 end
-				say("Go Fish: asking for " .. best.Name, "GoFish")
-			else
-				say("Go Fish needs readable legal card counts", "GoFish")
-			end
-			return
-		end
-		if line:find("Waiting for", 1, true) or line:find("'s turn", 1, true) then
-			say("Go Fish: waiting for D'Arby", "GoFish")
-			return
-		end
-		local result = child(cached.goFish, "Result", true)
-		if label(result, "Body"):find("Bounty complete", 1, true) then
-			if ctx.click(child(result, "Primary")) then state.nextAction = now + 1 end
-			say("Go Fish: closing the completed match", "GoFish")
-			return
-		end
-		say("Go Fish: waiting for native instructions", "GoFish")
+		if not incidents or type(incidents.GoFishStep) ~= "function" then return false end
+		local handled = incidents.GoFishStep(state, cached)
+		busy = handled or busy
+		return handled
 	end
 
 	local function teaStep()
@@ -9421,14 +10230,30 @@ _G.StandOutParts.Bounties = function(ctx)
 			return
 		end
 		local now = ctx.now()
-		if tea.stage == "dragStart" or tea.stage == "dragMove" then
-			say("Iced tea: moving the native drag prop", "IcedTea")
-			return
-		end
-		local step = tea.status:match("Step%s+(%d+)%s*/") or tea.body
+		local dragging = tea.stage == "dragStart" or tea.stage == "dragMove"
+		local native = incidents and incidents.TabletopState and incidents.TabletopState(tea, state)
+		local step = native and native.Index or tea.status:match("Step%s+(%d+)%s*/") or tea.body:gsub("^Move the highlighted ", "Move the ")
 		if tea.step ~= step then
 			releaseKeys()
 			tea.step, tea.stage, tea.retryAt, tea.failures, tea.failed = step, nil, 0, 0, false
+			tea.viewClicks, tea.viewRetryAt, tea.viewEntering = 0, 0, nil
+			if dragging then return end
+		end
+		if native and (native.Done or native.Ending or native.Kind == "Wait") then
+			releaseKeys()
+			tea.stage = nil
+			say("Iced tea: waiting for the native recipe step", "IcedTea")
+			return
+		end
+		if dragging then
+			say("Iced tea: moving the native drag prop", "IcedTea")
+			return
+		end
+		if native and native.Kind == "Click" then
+			releaseKeys()
+			if ctx.tap(32) then state.nextAction = now + 0.2 end
+			say("Iced tea: " .. tea.action, "IcedTea")
+			return
 		end
 		if tea.failed then
 			say("Iced tea needs native recipe confirmation", "IcedTea")
@@ -9457,25 +10282,56 @@ _G.StandOutParts.Bounties = function(ctx)
 			say("Iced tea: waiting for the native recipe step", "IcedTea")
 			return
 		end
-		if tea.target and tea.target.Transparency < 0.9 and tea.body:find("Move the highlighted", 1, true) then
-			if tea.view == "OVERHEAD VIEW" then
-				if ctx.click(tea.viewObject) then state.nextAction = now + 0.3 end
-				say("Iced tea: opening the native overhead view", "IcedTea")
+		-- The native view button can stop responding during a drag step.
+		if tea.view == "OVERHEAD VIEW" and (tea.body:find("Hold to pour", 1, true)
+			or tea.target and tea.target.Transparency < 0.9 and tea.body:find("Move the highlighted", 1, true)) then
+			if tea.stage == "hold" then releaseKeys(); tea.stage = nil; return end
+			if native and native.ViewEligible == false then say("Iced tea: waiting for the native view control", "IcedTea"); return end
+			if now < (tea.viewRetryAt or 0) then return end
+			if (tea.viewClicks or 0) >= 6 then
+				tea.failed = true
+				say("Iced tea needs native view confirmation", "IcedTea")
 				return
 			end
+			local p, size = tea.viewObject.AbsolutePosition, tea.viewObject.AbsoluteSize
+			local clicked
+			if p and size and (size.X <= 1 or size.Y <= 1) and finite(p.X) and finite(p.Y) then
+				-- shortcut: native Reset uses this measured interior; recalibrate if its layout changes.
+				if not tea.viewEntering then
+					if ctx.mouseMove(p.X + 84, p.Y - 100, nil, true) then
+						tea.viewEntering, tea.viewRetryAt = true, now + 0.1
+					end
+					return
+				end
+				clicked = ctx.mouseMove(p.X + 84, p.Y + 40, nil, true)
+				if clicked then
+					if type(setrobloxinput) == "function" then setrobloxinput(true) end
+					mouse1click()
+				end
+			else clicked = ctx.click(tea.viewObject) end
+			if clicked then
+				tea.viewClicks = (tea.viewClicks or 0) + 1
+				tea.viewEntering = nil
+				tea.viewRetryAt, state.nextAction = now + 1, now + 1
+			end
+			say("Iced tea: opening the native overhead view", "IcedTea")
+			return
+		end
+		if tea.target and tea.target.Transparency < 0.9 and tea.body:find("Move the highlighted", 1, true) then
 			if type(ctx.mouseMove) ~= "function" then
 				say("Iced tea needs calibrated native pointer input", "IcedTea")
 				return
 			end
 			local propName = tea.body:match("Move the highlighted (.-) over the ")
 			local propKey = propName and normalized(propName)
-			local prop = propKey and tea.props[propKey == "icecubes" and "ice" or propKey == "lemonslice" and "lemon" or propKey]
+			propKey = propKey == "icecubes" and "ice" or propKey == "lemonslice" and "lemon" or propKey
+			local prop = propKey and tea.props[propKey]
 			if not prop then
 				say("Iced tea needs the named prop's drag bounds", "IcedTea")
 				return
 			end
 			if now >= tea.retryAt and not tea.stage then
-				tea.stage, tea.prop, tea.start = "dragStart", prop, now
+				tea.stage, tea.prop, tea.pivot, tea.start, tea.pickAt = "dragStart", prop, tea.pivots and tea.pivots[propKey] or prop, now, nil
 			end
 			say("Iced tea: placing " .. propName, "IcedTea")
 			return
@@ -9483,7 +10339,9 @@ _G.StandOutParts.Bounties = function(ctx)
 		if tea.action:find("[SPACE]", 1, true) then
 			if not tea.stage then
 				tea.fill, tea.targetHeight = nil, nil
-				if tea.status:lower():match("stop between %d+%% and %d+%%") then
+				local a, b = tea.bands[1], tea.bands[2]
+				local visibleBand = a and b and finite(a.Transparency) and finite(b.Transparency) and a.Transparency < 0.9 and b.Transparency < 0.9
+				if tea.status:lower():match("stop between %d+%% and %d+%%") or visibleBand then
 					local low, high = math.huge, -math.huge
 					for _, band in ipairs(tea.bands) do
 						low = math.min(low, band.Position.Y)
@@ -9533,6 +10391,18 @@ _G.StandOutParts.Bounties = function(ctx)
 		say("Iced tea: waiting for the native recipe", "IcedTea")
 	end
 
+	function module.ResumeDialogue()
+		if not ctx.getSetting("AutoBounties") then return false end
+		sense(true)
+		if not state.readable or not state.active or state.leader ~= player.UserId or not state.dialogue or ctx.now() < state.nextAction then return false end
+		if incidentDialogue() or incidents and incidents.Step(state, cached, scenes)
+			or ctx.dialogueStep and ctx.dialogueStep("BountyClose") then
+			state.nextAction = ctx.now() + 0.12
+			return true
+		end
+		return false
+	end
+
 	function module.Ready()
 		local blocked, selection = ctx.getSetting("BlockedBounties"), 0
 		if type(blocked) == "table" then
@@ -9569,7 +10439,8 @@ _G.StandOutParts.Bounties = function(ctx)
 			then
 				return true
 			end
-			if cached.heyHead:find("HOLD STILL", 1, true) then
+			local _, index = parseId(state.active)
+			if index == 7 and (state.phase == "spot" or state.phase == "catching") or cached.heyHead:find("HOLD STILL", 1, true) then
 				return true
 			end
 			if nearestFighter() or nearestPrompt() then
@@ -9588,6 +10459,34 @@ _G.StandOutParts.Bounties = function(ctx)
 		return cached.petyrPart ~= nil
 	end
 
+	function module.SeatedAtPaco()
+		local root = ctx.getRoot()
+		local tableModel = child(child(world, "ArmWrestlingTables"), "BanditArmWrestling")
+		if not root or not tableModel then return false end
+		for _, name in ipairs({"Seat1", "Seat2"}) do
+			local seat = child(tableModel, name)
+			if seat and seat.Parent and child(seat, "SeatWeld") and validVector(seat.Position) then
+				local delta = root.Position - seat.Position
+				if delta.X ^ 2 + delta.Z ^ 2 < 0.25 and delta.Y > 0.8 and delta.Y < 2.5 then return true end
+			end
+		end
+		return false
+	end
+
+	function module.CarryingPaco()
+		local _, index = parseId(state.active)
+		return ctx.getSetting("AutoBounties") == true and state.readable == true and state.leader == player.UserId
+			and index == 10 and not state.claim and state.phase == "hospital"
+	end
+
+	function module.NeedsFreeHands()
+		local _, index = parseId(state.active)
+		return ctx.getSetting("AutoBounties") == true and state.readable == true and state.leader == player.UserId
+			and not state.claim and (index == 12 and (state.karaokeObjective == true or state.karaokeSession ~= nil)
+				or index == 14 and (state.phase == "brew" or state.phase == "drink"
+					or type(state.teaOwner) == "string" and state.teaOwner ~= ""))
+	end
+
 	function module.Busy()
 		return (busy or (state.interactionOwned and ctx.interactionBusy and ctx.interactionBusy()) or false)
 			and ctx.getSetting("AutoBounties") == true
@@ -9595,7 +10494,7 @@ _G.StandOutParts.Bounties = function(ctx)
 
 	function module.Step()
 		executing = true
-		sense(true)
+		sense(state.armSession ~= nil)
 		busy = false
 		if not ctx.getSetting("AutoBounties") or not ctx.getRoot() then
 			releaseKeys()
@@ -9607,6 +10506,26 @@ _G.StandOutParts.Bounties = function(ctx)
 			say("Bounties need readable ActiveBounties state")
 			return false
 		end
+		local _, activeIndex = parseId(state.active)
+		if not state.inputLock and not state.armSession and (not state.active or activeIndex == 10 and state.phase == "pickup")
+			and module.SeatedAtPaco and module.SeatedAtPaco() then
+			busy = true
+			if state.interactionOwned and ctx.cancelInteraction then ctx.cancelInteraction() end
+			state.interactionOwned = false
+			if not state.pacoExitAt then
+				if hold(88) then state.pacoExitAt = ctx.now() end
+			else
+				local elapsed = ctx.now() - state.pacoExitAt
+				if elapsed < 0.15 then hold(88)
+				elseif elapsed < 0.55 then release(88)
+				elseif elapsed < 1.15 then release(88); hold(32)
+				else release(32) end
+			end
+			say("Paco: waiting for the native chair exit", "Paco")
+			return true
+		elseif state.pacoExitAt then
+			release(88); release(32); state.pacoExitAt = nil
+		end
 		if state.interactionOwned and ctx.interactionBusy and ctx.interactionBusy() then
 			busy = true
 			return true
@@ -9616,7 +10535,15 @@ _G.StandOutParts.Bounties = function(ctx)
 			busy = state.menuStage ~= nil or state.karaokeSession ~= nil or state.teaOwner ~= nil or state.inputLock
 			return busy
 		end
-		if (state.menuStage == "claiming" or state.claim) and claimAtPetyr() then return busy end
+		if (activeIndex == 13 or state.active == nil) and state.inputLock and not state.dialogue then
+			if goFishStep() then return true end
+			if activeIndex == 13 then
+				releaseKeys()
+				busy = true
+				say("Go Fish: waiting for the current native session", "GoFish")
+				return true
+			end
+		end
 		if state.dialogue and incidentDialogue() then
 			busy = true
 			state.nextAction = ctx.now() + 0.12
@@ -9629,6 +10556,7 @@ _G.StandOutParts.Bounties = function(ctx)
 			state.nextAction = ctx.now() + 0.12
 			return true
 		end
+		if (state.menuStage == "claiming" or state.claim) and claimAtPetyr() then return busy end
 		if not state.active or state.claim then
 			petyrMenu()
 			return busy
@@ -9671,12 +10599,8 @@ _G.StandOutParts.Bounties = function(ctx)
 			say("Paco needs the current arm-wrestling round target", "Paco")
 			return true
 		end
-		if index == 13 and state.inputLock and cached.goFish then
-			goFishStep()
-			return true
-		end
 		if
-			index == 8
+			not incidents and index == 8
 			and type(state.progress) == "table"
 			and state.progress.IncidentPhase == "box"
 			and label(cached.choices, "Choice1") ~= ""
@@ -9705,7 +10629,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		if
 			index == 7
 			and (
-				(type(state.progress) == "table" and state.progress.IncidentPhase == "spot")
+				(type(state.progress) == "table" and (state.progress.IncidentPhase == "spot" or state.progress.IncidentPhase == "catching"))
 				or cached.heyHead:find("HOLD STILL", 1, true)
 			)
 		then
@@ -9719,8 +10643,18 @@ _G.StandOutParts.Bounties = function(ctx)
 		end
 		local prompt, distance = nearestPrompt()
 		if prompt then
-			if index == 14 and prompt.object.Name == "BountyIncident_Pitcher" then
-				local approach = prompt.part.Position + Vector3.new(5, 0, 0)
+			if index == 10 and prompt.object.Name == "BountyIncident_PacoPickup" then
+				local approach = prompt.part.Position + Vector3.new(2, 3, 0)
+				local delta = ctx.getRoot().Position - approach
+				if math.sqrt(delta.X ^ 2 + delta.Z ^ 2) > 1.5 or distance > 5 then
+					ctx.move(approach)
+					say("Paco: approaching injured Paco", family)
+					return false
+				end
+			end
+			if index == 14 and (prompt.object.Name == "BountyIncident_Pitcher" or state.phase == "gather" and distance < 2) then
+				local pitcher = prompt.object.Name == "BountyIncident_Pitcher"
+				local approach = prompt.part.Position + (pitcher and Vector3.new(5, 0, 0) or Vector3.new(3, 2, 0))
 				local delta = ctx.getRoot().Position - approach
 				if math.sqrt(delta.X ^ 2 + delta.Z ^ 2) > 1.5 then
 					ctx.move(approach)
@@ -9728,8 +10662,8 @@ _G.StandOutParts.Bounties = function(ctx)
 					return false
 				end
 			end
-			if distance > 6 then
-				ctx.move(prompt.part.Position + Vector3.new(0, 0, 2))
+			if distance > 7 then
+				ctx.move(prompt.part.Position + Vector3.new(0, 3, index == 13 and 5 or 2))
 				say(family .. ": reaching " .. prompt.object.Name, family)
 			else
 				ctx.interact(prompt.object)
@@ -9755,79 +10689,111 @@ _G.StandOutParts.Bounties = function(ctx)
 		end
 		local now = ctx.now()
 		if incidents then incidents.Render() end
-		if karaoke then
-			if ctx.attr(player, "KaraokeInputLocked") ~= karaoke.session then
+		local owner = karaoke
+		if owner then
+			local _, family = parseId(state.active)
+			if family ~= 12 or state.claim or ctx.attr(player, "KaraokeInputLocked") ~= owner.session then
 				releaseKeys()
+				karaoke = nil
 				return
 			end
-			for index, held in pairs(karaoke.held) do
-				if held.tail and held.tail.Parent and held.tail.AbsoluteSize.X > 1 then
+			if karaoke ~= owner then return end
+			if owner.lane then
+				collectKaraoke(owner.session)
+				if karaoke ~= owner then return end
+			end
+			for index, held in pairs(owner.held) do
+				local size = held.tail and held.tail.Parent and held.tail.AbsoluteSize
+				if size and finite(size.X) and (size.X > 1 or size.X == 0) then
 					hold(held.key)
 				elseif now - held.start >= 0.04 then
 					release(held.key)
-					karaoke.held[index] = nil
+					owner.held[index] = nil
 				end
 			end
-			for _, note in ipairs(karaoke.notes) do
-				if not karaoke.pressed[note.index] and note.object.Parent and note.receptor.Parent then
+			for _, note in ipairs(owner.notes) do
+				if not owner.pressed[note.index] and note.object.Parent and note.receptor.Parent then
 					local np, ns = note.object.AbsolutePosition, note.object.AbsoluteSize
 					local rp, rs = note.receptor.AbsolutePosition, note.receptor.AbsoluteSize
-					local delta = np.X + ns.X / 2 - rp.X - rs.X / 2
-					if delta <= 5 and delta >= -18 then
+					local delta = np and ns and rp and rs and finite(np.X) and finite(ns.X) and finite(rp.X) and finite(rs.X)
+						and ns.X >= 0 and rs.X >= 0
+						and (ns.X > 1 and rs.X > 1 and np.X + ns.X / 2 - rp.X - rs.X / 2 or np.X - rp.X)
+					if delta and delta <= 5 and delta >= -18 then
 						if inputs[note.key] then
 							release(note.key)
 						end
-						hold(note.key)
-						karaoke.pressed[note.index] = true
-						karaoke.held[note.index] = { key = note.key, tail = note.tail, start = now }
+						if hold(note.key) then
+							owner.pressed[note.index] = true
+							owner.held[note.key] = { key = note.key, tail = note.tail, start = now }
+						end
 					end
 				end
 			end
 		end
-		if tea then
-			if ctx.attr(player, "TabletopInputOwner") ~= tea.owner then
+		local currentTea = tea
+		if currentTea then
+			local owner = ctx.attr(player, "TabletopInputOwner")
+			if tea ~= currentTea or owner ~= currentTea.owner then
 				releaseKeys()
 				return
 			end
-			if (tea.stage == "dragStart" or tea.stage == "dragMove") and type(ctx.mouseMove) ~= "function" then
+			if (currentTea.stage == "dragStart" or currentTea.stage == "dragMove") and type(ctx.mouseMove) ~= "function" then
 				releaseKeys()
-				tea.stage = nil
+				currentTea.stage = nil
 				say("Iced tea needs calibrated native pointer input", "IcedTea")
 				return
 			end
-			if tea.stage == "hold" then
-				if tea.fill and tea.fill.Size.Y >= tea.targetHeight then
+			if currentTea.stage == "hold" then
+				local height = currentTea.fill and currentTea.fill.Size.Y
+				if tea ~= currentTea then releaseKeys(); return end
+				if height and height >= currentTea.targetHeight then
 					release(32)
-					tea.stage, tea.confirmAt = "confirm", now
-				elseif now - tea.start > 20 then
+					currentTea.stage, currentTea.confirmAt = "confirm", now
+				elseif now - currentTea.start > 20 then
 					release(32)
-					tea.stage, tea.confirmAt = "confirm", now
+					currentTea.stage, currentTea.confirmAt = "confirm", now
 					say("Iced tea needs native pour confirmation", "IcedTea")
 				else
 					hold(32)
 				end
-			elseif tea.stage == "dragStart" and tea.prop and tea.target then
-				local point, visible = WorldToScreen(tea.prop.Position)
-				if visible then
-					if ctx.mouseMove(point.X, point.Y, nil, true) then
-						mouse1press()
-						tea.mouseDown, tea.stage, tea.start = true, "dragMove", now
-					end
+			elseif currentTea.stage == "dragStart" and currentTea.prop and currentTea.target then
+				local point, visible = WorldToScreen(currentTea.prop.Position)
+				local pivot, pivotVisible = WorldToScreen((currentTea.pivot or currentTea.prop).Position)
+				if tea ~= currentTea then releaseKeys(); return end
+				if visible and pivotVisible then
+					local moved = ctx.mouseMove(point.X, point.Y, nil, true)
+					if tea ~= currentTea then releaseKeys(); return end
+					if moved then
+						currentTea.pickAt = currentTea.pickAt or now
+						if now - currentTea.pickAt >= 0.06 then
+							mouse1press()
+							currentTea.mouseDown, currentTea.stage, currentTea.start = true, "dragMove", now
+							currentTea.pickX, currentTea.pickY = point.X, point.Y
+							currentTea.gripX, currentTea.gripY = point.X - pivot.X, point.Y - pivot.Y
+						end
+					else currentTea.pickAt = nil end
 				else
-					tea.stage, tea.retryAt = nil, now + 2
+					currentTea.stage, currentTea.retryAt, currentTea.pickAt = nil, now + 2, nil
 					say("Iced tea needs its drag prop on screen", "IcedTea")
 				end
-			elseif tea.stage == "dragMove" then
-				local destination, visible = WorldToScreen(tea.target.Position)
-				local settled = visible and ctx.mouseMove(destination.X, destination.Y, nil, true)
-				if settled and tea.status == "Release now to drop it in." then tea.dropReadyAt = tea.dropReadyAt or now
-				else tea.dropReadyAt = nil end
-				if now - tea.start > 0.4 and tea.dropReadyAt and now - tea.dropReadyAt >= 0.12 then
+			elseif currentTea.stage == "dragMove" then
+				if now - currentTea.start < 0.1 then return end
+				local destination, visible = WorldToScreen(currentTea.target.Position)
+				if tea ~= currentTea then releaseKeys(); return end
+				local x, y = destination.X + (currentTea.gripX or 0), destination.Y + (currentTea.gripY or 0)
+				local alpha = math.clamp((now - currentTea.start - 0.1) / 0.55, 0, 1)
+				local moved = visible and ctx.mouseMove((currentTea.pickX or x) + (x - (currentTea.pickX or x)) * alpha,
+					(currentTea.pickY or y) + (y - (currentTea.pickY or y)) * alpha, nil, true)
+				if tea ~= currentTea then releaseKeys(); return end
+				local settled = moved and alpha >= 1
+				if settled and currentTea.status == "Release now to drop it in." then currentTea.dropReadyAt = currentTea.dropReadyAt or now
+				else currentTea.dropReadyAt = nil end
+				if now - currentTea.start > 0.4 and currentTea.dropReadyAt and now - currentTea.dropReadyAt >= 0.12 then
 					mouse1release()
-					tea.mouseDown, tea.stage, tea.retryAt, tea.confirmAt, tea.dropReadyAt = false, "confirm", now + 2, now, nil
-				elseif now - tea.start > 3 then
+					currentTea.mouseDown, currentTea.stage, currentTea.retryAt, currentTea.confirmAt, currentTea.dropReadyAt = false, "confirm", now + 2, now, nil
+				elseif now - currentTea.start > 3 then
 					mouse1release()
-					tea.mouseDown, tea.stage, tea.retryAt, tea.confirmAt, tea.dropReadyAt = false, "confirm", now + 4, now, nil
+					currentTea.mouseDown, currentTea.stage, currentTea.retryAt, currentTea.confirmAt, currentTea.dropReadyAt = false, "confirm", now + 4, now, nil
 					say("Iced tea needs native drag placement confirmation", "IcedTea")
 				end
 			end
@@ -9836,7 +10802,11 @@ _G.StandOutParts.Bounties = function(ctx)
 
 	function module.Pause()
 		releaseKeys()
-		if tea and tea.failed then tea.failed, tea.failures, tea.stage, tea.retryAt = false, 0, nil, ctx.now() + 0.2 end
+		state.pacoExitAt = nil
+		if tea and tea.failed then
+			tea.failed, tea.failures, tea.stage, tea.retryAt = false, 0, nil, ctx.now() + 0.2
+			tea.viewClicks, tea.viewRetryAt = 0, 0
+		end
 		if tea and (tea.stage == "dragStart" or tea.stage == "dragMove") then
 			tea.stage, tea.retryAt = nil, ctx.now() + 0.2
 		end
@@ -9847,6 +10817,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		releaseKeys()
 		executing, busy = false, false
 		state.menuStage = nil
+		state.pacoExitAt = nil
 		state.interactionOwned = false
 		karaoke, tea = nil, nil
 	end
@@ -9900,8 +10871,6 @@ _G.StandOutParts.Bounties = function(ctx)
 	return module
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 _G.StandOutParts.Meteors = function(ctx)
@@ -10173,8 +11142,6 @@ _G.StandOutParts.Meteors = function(ctx)
 	return module
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 local function phoneFinite(value: any): boolean
@@ -10203,6 +11170,9 @@ _G.StandOutParts.PhoneSnapshotReader = function(ctx: any): any
 		local ok, value = pcall(readMemory, kind, address)
 		return ok and value or nil
 	end
+	local function tagged(address: any, tag: number): boolean
+		return pointer(address) and (memory("byte", address + 1) == tag or memory("byte", address) == tag)
+	end
 	local function textValue(value: any): any
 		if type(value) ~= "string" then return nil end
 		if value:sub(1, 1) ~= '"' then return value end
@@ -10215,8 +11185,12 @@ _G.StandOutParts.PhoneSnapshotReader = function(ctx: any): any
 		return ok and type(rows) == "table" and rows or nil
 	end
 	local function nativeMap(address: any): any
-		if not pointer(address) or memory("byte", address) ~= 6 then return nil end
-		local exponent, arrayCount, nodes = memory("byte", address + 5), memory("int", address + 8), memory("uintptr", address + 40)
+		if not pointer(address) then return nil end
+		local current = memory("byte", address + 1) == 6
+		if not current and memory("byte", address) ~= 6 then return nil end
+		local exponent = memory("byte", address + (current and 4 or 5))
+		if not phoneInteger(exponent, 0, 7) or current and memory("byte", address + 7) ~= math.min(2 ^ exponent - 1, 255) then return nil end
+		local arrayCount, nodes = memory("int", address + 8), memory("uintptr", address + 40)
 		if not phoneInteger(exponent, 0, 7) or not phoneInteger(arrayCount, 0, 128) or not pointer(nodes) then return nil end
 		local count, map = 2 ^ exponent, {}
 		local rows = rowsAt(nodes, count)
@@ -10231,14 +11205,14 @@ _G.StandOutParts.PhoneSnapshotReader = function(ctx: any): any
 				elseif tag == 4 then
 					local x, y, z = memory("float", slot), memory("float", slot + 4), memory("float", slot + 8)
 					if phoneFinite(x) and phoneFinite(y) and phoneFinite(z) then map[row.key] = Vector3.new(x, y, z) end
-				elseif tag == 7 then local value = memory("uintptr", slot); if pointer(value) and memory("byte", value) == 7 then map[row.key] = value end
+				elseif tag == 7 then local value = memory("uintptr", slot); if tagged(value, 7) then map[row.key] = value end
 				end
 			end
 		end
 		return map
 	end
 	local function uprefs(closure: any): any
-		if not pointer(closure) or memory("byte", closure) ~= 7 or memory("byte", closure + 3) ~= 0 then return nil end
+		if not tagged(closure, 7) or memory("byte", closure + (memory("byte", closure + 1) == 7 and 5 or 3)) ~= 0 then return nil end
 		local count = memory("byte", closure + 4)
 		if not phoneInteger(count, 1, 48) then return nil end
 		local refs = {}
@@ -10249,11 +11223,11 @@ _G.StandOutParts.PhoneSnapshotReader = function(ctx: any): any
 		return refs
 	end
 	local function remoteRef(ref: any): boolean
-		return remote ~= nil and ref.tag == 8 and pointer(ref.pointer) and memory("byte", ref.pointer) == 8
+		return remote ~= nil and ref.tag == 8 and tagged(ref.pointer, 8)
 			and memory("int", ref.pointer + 4) == 16 and memory("uintptr", ref.pointer + 16) == remote.Address
 	end
 	local function cellMap(cell: any): any
-		if not pointer(cell) or memory("byte", cell) ~= 15 then return nil end
+		if not tagged(cell, 15) then return nil end
 		local value = memory("uintptr", cell + 8)
 		if not pointer(value) or memory("int", value + 12) ~= 6 then return nil end
 		return nativeMap(memory("uintptr", value))
@@ -10381,6 +11355,7 @@ _G.StandOutParts.PhoneEliminations = function(ctx: any): any
 			packetMessage, packetAt = ok and message or "Waiting for a readable native elimination snapshot", clock()
 		end
 		if packetCache then snapshot, authoritative = packetCache, true else snapshotMessage = packetMessage end
+		if snapshot and (snapshot.State == "Searching" or snapshot.State == "Active" or snapshot.State == "Completing") then pendingUntil = 0 end
 		if not snapshot and authoritative then return nil, snapshotMessage or "Waiting for a readable native elimination snapshot" end
 		if snapshot and snapshot.State ~= "Active" then
 			if snapshot.State == "Searching" then return nil, "Native phone is finding an elimination target" end
@@ -10470,12 +11445,10 @@ _G.StandOutParts.PhoneEliminations = function(ctx: any): any
 	return module
 end
 
-end
-do
 _G.StandOutParts = _G.StandOutParts or {}
 
 _G.StandOutParts.Rafts = function(ctx)
-	local module = { Available = true, Status = "Waiting for scrap platforms", Metrics = { HeavyAttempts = 0, BrokenPieces = 0, LootAttempts = 0, LootRemoved = 0, TargetsCleared = 0 } }
+	local module = { Available = true, Status = "Waiting for scrap platforms", Metrics = { HeavyAttempts = 0, BrokenPieces = 0, LootAttempts = 0, LootRemoved = 0, Rewards = 0, TargetsCleared = 0 } }
 	local now, lastCollect, targets, retryAfter, suppressed = ctx.now or tick, -math.huge, {}, {}, {}
 	local job, lastHeavy, lastMove, lastSummon = nil, -math.huge, -math.huge, -math.huge
 	local function child(parent, name) return parent and parent:FindFirstChild(name) end
@@ -10519,10 +11492,12 @@ _G.StandOutParts.Rafts = function(ctx)
 		return { model = model, platform = platform, base = anchor or pieces[1], pieces = pieces, visual = attr(model, "VisualOnly") == true, shadows = {} }
 	end
 	local function eligible(target)
-		if not live(target.model) or not live(target.platform) or not live(target.base) or protected(target.model) or protected(target.platform) then return false end
-		if target.model.Parent.Address ~= target.platform.Address or not position(target.base.Position) then return false end
+		local modelParent = target.model and target.model.Parent
+		if not modelParent or not live(target.platform) or not live(target.base) or protected(target.model) or protected(target.platform) then return false end
+		if modelParent.Address ~= target.platform.Address or not position(target.base.Position) then return false end
 		for _, object in ipairs(target.pieces) do
-			if live(object) and object.Parent.Address == target.model.Address and not protected(object) then return true end
+			local parent = object.Parent
+			if parent and parent.Address == target.model.Address and not protected(object) then return true end
 		end
 		return false
 	end
@@ -10532,6 +11507,27 @@ _G.StandOutParts.Rafts = function(ctx)
 			if part(object) and object.Name == "Destructable" then return false end
 		end
 		return true
+	end
+	local function deckTop(target)
+		local best, distance = nil, math.huge
+		local baseSize = target.base.Size
+		local clearance = position(baseSize) and math.max(baseSize.X, baseSize.Z) / 2 + 1.5 or 3
+		for _, object in ipairs(target.platform:GetChildren()) do
+			if part(object) and object.Name == "Destructable" and not protected(object) and object.CanCollide ~= false then
+				local size, frame = object.Size, object.CFrame
+				if position(object.Position) and position(size) and size.X > 0 and size.Y > 0 and size.Z > 0 and frame
+					and position(frame.RightVector) and position(frame.UpVector) and position(frame.LookVector) then
+					local height = (math.abs(frame.RightVector.Y) * size.X + math.abs(frame.UpVector.Y) * size.Y + math.abs(frame.LookVector.Y) * size.Z) / 2
+					local point = object.Position + Vector3.new(0, height, 0)
+					local offset = Vector3.new(point.X - target.base.Position.X, 0, point.Z - target.base.Position.Z).Magnitude
+					if position(point) and (target.base.Position.Y <= point.Y + 0.5 or offset >= clearance)
+						and (not best or point.Y > best.Y + 0.25 or math.abs(point.Y - best.Y) <= 0.25 and offset < distance) then
+						best, distance = point, offset
+					end
+				end
+			end
+		end
+		return best
 	end
 	local function nearbyCharacter(target)
 		local root, _, character = ctx.getRoot()
@@ -10587,6 +11583,26 @@ _G.StandOutParts.Rafts = function(ctx)
 		for _, folder in ipairs(lootRoots()) do for _, model in ipairs(folder:GetChildren()) do seen[model.Address] = true end end
 		return seen
 	end
+	local function rewardSnapshot()
+		local data = child(ctx.player, "Data")
+		local stats = child(data, "Stats")
+		local coins, inventory = child(stats, "Coins"), child(stats, "Inventory")
+		if attr(data, "Loaded") ~= true or not coins or not inventory or type(ctx.decode) ~= "function" then return nil end
+		local money = coins.Value
+		if type(money) ~= "number" or money ~= money or money < 0 or money == math.huge then return nil end
+		local ok, entries = pcall(ctx.decode, inventory)
+		if not ok or type(entries) ~= "table" then return nil end
+		local items = {}
+		for _, item in pairs(entries) do
+			local name = type(item) == "string" and item or type(item) == "table" and item.Name
+			local amount = type(item) == "table" and item.Amount
+			if amount == nil then amount = 1 end
+			if type(name) ~= "string" or name == "" or type(amount) ~= "number" or amount ~= amount
+				or amount <= 0 or amount == math.huge or amount % 1 ~= 0 then return nil end
+			items[name] = (items[name] or 0) + amount
+		end
+		return { coins = money, items = items }
+	end
 	local function belongs(object, model)
 		for _ = 1, 5 do
 			if not object then return false end
@@ -10597,8 +11613,9 @@ _G.StandOutParts.Rafts = function(ctx)
 	end
 	local function lootEligible(target)
 		local owner = attr(target.model, "OwnerUserId")
-		return live(target.model) and live(target.base) and live(target.prompt) and position(target.base.Position)
-			and target.model.Parent.Address == target.folder.Address and attr(target.model, "ItemName") == target.item
+		local parent = target.model and target.model.Parent
+		return parent ~= nil and live(target.base) and live(target.prompt) and position(target.base.Position)
+			and parent.Address == target.folder.Address and attr(target.model, "ItemName") == target.item
 			and (owner == nil or owner == 0 or owner == ctx.player.UserId) and target.prompt.Name == "WorldItemPickup"
 			and belongs(target.base, target.model) and belongs(target.prompt, target.model)
 			and attr(target.prompt, "StoryPromptAvailable") ~= false and (target.base.Position - job.point).Magnitude <= 30
@@ -10671,16 +11688,14 @@ _G.StandOutParts.Rafts = function(ctx)
 			if now() > job.deadline then finish("Heavy attacks timed out without a confirmed break", false); return "blocked" end
 			local root, _, character = ctx.getRoot()
 			if not root or not character or character.Address ~= job.characterAddress then finish("Raft farm interrupted by character change or death", false); return "blocked" end
-			local point, rootPoint = job.base.Position, root.Position
-			local direction = Vector3.new(rootPoint.X - point.X, 0, rootPoint.Z - point.Z)
-			direction = direction.Magnitude > 0.01 and direction.Unit or Vector3.new(0, 0, 1)
-			local approach = point + direction * 4 + Vector3.new(0, 1.2, 0)
+			local point, rootPoint = deckTop(job), root.Position
+			if not point then finish("Raft deck changed before approach", false); return "blocked" end
+			local approach = point + Vector3.new(0, 3, 0)
 			local toward = Vector3.new(point.X - rootPoint.X, 0, point.Z - rootPoint.Z)
 			local facing = root.CFrame and root.CFrame.LookVector
-			local aligned = toward.Magnitude <= 0.01 or facing and facing:Dot(toward.Unit) >= 0.97
-			if (point - rootPoint).Magnitude > 6 or not aligned then
-				if (approach - rootPoint).Magnitude < 1.5 then approach = rootPoint + direction * 1.6 end
-				if now() - lastMove >= 0.2 then ctx.move(approach, point); lastMove = now() end
+			local aligned = toward.Magnitude <= 1.5 or facing and facing:Dot(toward.Unit) >= 0.97
+			if (point - rootPoint).Magnitude > 6 or rootPoint.Y < point.Y + 1.5 or not aligned then
+				if now() - lastMove >= 0.2 then ctx.move(approach, job.point); lastMove = now() end
 				report("Approaching scrap debris")
 				return "busy"
 			end
@@ -10695,16 +11710,36 @@ _G.StandOutParts.Rafts = function(ctx)
 			if ctx.prepareRaftAttack and not ctx.prepareRaftAttack(character) then report("Putting umbrella away before the heavy attack"); return "busy" end
 			if now() - lastHeavy >= 2 then
 				local seen = not job.attempted and baseline() or nil
+				local reward = not job.attempted and rewardSnapshot() or nil
 				local sent = ctx.tap(ctx.bind("Heavy", "R"))
 				lastHeavy = now()
 				if sent then
 					if seen then job.baseline = seen end
+					if reward then job.rewardBefore = reward end
 					job.attempted = true
 					module.Metrics.HeavyAttempts = module.Metrics.HeavyAttempts + 1
 				end
 			end
 			report("Breaking scrap debris with heavy attacks")
 			return "busy"
+		end
+		if job.rewardBefore and not job.rewardConfirmed and now() >= (job.rewardReadAt or 0) and nearbyCharacter(job) then
+			job.rewardReadAt = now() + 0.2
+			local current = rewardSnapshot()
+			if current then
+				local gained = {}
+				for name, amount in pairs(current.items) do
+					local delta = amount - (job.rewardBefore.items[name] or 0)
+					if delta > 0 then gained[name] = delta end
+				end
+				local coins = math.max(0, current.coins - job.rewardBefore.coins)
+				if coins > 0 or next(gained) then
+					-- Ocean scrap can award inventory directly instead of spawning a pickup.
+					job.rewardConfirmed, job.confirmed, job.quietUntil = true, job.confirmed + 1, now() + 0.2
+					module.Metrics.Rewards = module.Metrics.Rewards + 1
+					module.LastReward = { at = now(), coins = coins, items = gained, platform = job.platform.Address }
+				end
+			end
 		end
 		local target = job.loot
 		if target then
@@ -10732,7 +11767,7 @@ _G.StandOutParts.Rafts = function(ctx)
 		end
 		job.loot = findLoot()
 		if job.loot then job.loot.deadline = now() + 8; return "busy" end
-		if job.confirmed > 0 and now() >= (job.quietUntil or 0) then finish("Raft loot removed after pickup", true); return "done" end
+		if job.confirmed > 0 and now() >= (job.quietUntil or 0) then finish(job.rewardConfirmed and "Raft reward saved to inventory" or "Raft loot removed after pickup", true); return "done" end
 		if now() > job.deadline then finish("Raft cleared without a confirmed native loot drop", false); return "blocked" end
 		report("Waiting for native raft loot to spawn")
 		return "busy"
@@ -10740,7 +11775,6 @@ _G.StandOutParts.Rafts = function(ctx)
 	return module
 end
 
-end
 do
 local function startStandOut()
 	if _G.StandOut and _G.StandOut.Stop then
@@ -10768,13 +11802,17 @@ local function startStandOut()
 	local drawings: any, targets: any, prompts: any = {}, {}, {}
 	local snapshot: any = { mobs = {}, bosses = {}, users = {}, quests = {} }
 	local currentJob: any, interaction: any = nil, nil
+	local flyPoint, flyAt, flyVelocityY, flyGravity, flyAddress = nil, 0, nil, 196.2, nil
+	local speedOverride: any = nil
 	local lastMove, lastLight, lastHeavy, lastSkill, lastSummon, lastAimCamera = 0, 0, 0, 0, 0, 0
 	local nextSkill = 1
-	local lastUmbrella, lastInventoryClose, lastClick, jumpWasDown = 0, 0, 0, false
+	local lastUmbrella, lastInventoryClose, lastClick, jumpWasDown, umbrellaRequestClosing = 0, 0, 0, false, nil
+	local lastJumpVelocityY, highJumpUntil, highJumpReady = nil, 0, false
 	local phoneMissingAt: number? = nil
 	local focusAt, focusAddress = 0, 0
 	local worldFocus: any = nil
-	local mouseTarget: any, mouseOffsetX, mouseOffsetY = nil, 0, 0
+	local mouseTarget: any = nil
+	local pointerInside
 	local characterAddress = 0
 	local aimTarget, aimHumanoid, aimOffset, aimUpdated, aimCameraNeeded, aimAllowed = nil, nil, v3(0, 0, 0), 0, false, false
 	local function uiReady(): boolean
@@ -10789,7 +11827,7 @@ local function startStandOut()
 	}
 	local inputLocks = {
 		"DialogueInputLocked", "QTEInputLocked", "KaraokeInputLocked",
-		"GardeningInputLocked", "GardenEffectInputLocked", "JewelryInspecting",
+		"GardeningInputLocked", "GrowingInputOwner", "GardenEffectInputLocked", "JewelryInspecting",
 		"TabletopInputOwner", "PhoneInputLocked", "StoryCinematic",
 		"SettingsInputLocked", "QuickUseInventoryOpen",
 	}
@@ -10828,7 +11866,7 @@ local function startStandOut()
 				break
 			end
 			local class = node.ClassName
-			if class == "Part" or class == "MeshPart" or class == "UnionOperation" then
+			if class == "Part" or class == "MeshPart" or class == "UnionOperation" or class == "Seat" or class == "VehicleSeat" then
 				return node.Position
 			end
 			if class == "Model" then
@@ -10885,9 +11923,15 @@ local function startStandOut()
 		end
 	end
 	local function hold(vk: any): boolean
-		if type(vk) ~= "number" or vk < 1 or vk > 255 or not uiReady() or not isrbxactive() then
+		if type(vk) ~= "number" or vk < 1 or vk > 255 or not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive() then
 			return false
 		end
+		if vk == 1 or vk == 2 then
+			local mouse = player:GetMouse()
+			if not mouse or not pointerInside(mouse.X, mouse.Y) then release(vk); return false end
+		end
+		-- Matcha can close the native input gate between actions.
+		if type(setrobloxinput) == "function" then setrobloxinput(true) end
 		if not keys[vk] then
 			if vk == 1 then
 				mouse1press()
@@ -10901,7 +11945,7 @@ local function startStandOut()
 		return true
 	end
 	local function tap(vk: any): boolean
-		if not hold(vk) then
+		if keys[vk] or not hold(vk) then
 			return false
 		end
 		keys[vk] = tick() + 0.08
@@ -10918,6 +11962,11 @@ local function startStandOut()
 		if not root or not validPosition(p) or attr(character, "Stunned") or attr(game.Workspace, "TimeScale") == 0 then
 			return false
 		end
+		if currentJob and currentJob.seated and currentJob.seated() then return false end
+		if currentJob and currentJob.carrying and currentJob.carrying() then
+			local delta = p - root.Position
+			if delta.Magnitude > 6 then p = root.Position + delta.Unit * 6 end
+		end
 		local now = tick()
 		if now - lastMove < 0.2 or (root.Position - p).Magnitude < 1.5 then
 			return false
@@ -10928,7 +11977,7 @@ local function startStandOut()
 		runtime.Metrics.PositionWrites = runtime.Metrics.PositionWrites + 1
 		return true
 	end
-	local function pointerInside(x: number, y: number, margin: number?): boolean
+	pointerInside = function(x: number, y: number, margin: number?): boolean
 		local camera = game.Workspace.Camera
 		local viewport = camera and camera.ViewportSize
 		margin = margin or 0
@@ -10936,18 +11985,14 @@ local function startStandOut()
 			and finite(x) and finite(y) and x >= margin and y >= margin and x < viewport.X - margin and y < viewport.Y - margin
 	end
 	local function mouseMove(x: number, y: number, owner: any, screen: boolean?)
-		if not uiReady() or not isrbxactive() or library.Visible or library.MouseCaptured or not finite(x) or not finite(y) then
-			return false
-		end
+		if not uiReady() or not isrbxactive() or library.Visible or library.MouseCaptured or not finite(x) or not finite(y) then return false end
 		if not pointerInside(x, y) then mouseTarget = nil; return false end
-		screen = screen == true
-		if mouseTarget and mouseTarget.screen ~= screen then mouseTarget = nil end
+		if type(setrobloxinput) == "function" then setrobloxinput(true) end
 		if mouseTarget then mouseTarget.owner = owner end
 		if mouseTarget and math.abs(mouseTarget.x - x) <= 2 and math.abs(mouseTarget.y - y) <= 2 then
 			if mouseTarget.ready then
 				local mouse = player:GetMouse()
-				if finite(mouse.X) and finite(mouse.Y) and math.abs(mouse.X + (screen and mouseOffsetX or 0) - x) <= 2
-					and math.abs(mouse.Y + (screen and mouseOffsetY or 0) - y) <= 2 then return true end
+				if pointerInside(mouse.X, mouse.Y) and math.abs(mouse.X - x) <= 2 and math.abs(mouse.Y - y) <= 2 then return true end
 				mouseTarget.ready, mouseTarget.sentAt = false, nil
 			end
 			return false
@@ -10956,40 +12001,41 @@ local function startStandOut()
 			if mouseTarget.ready then mouseTarget.sentAt = nil end
 			mouseTarget.x, mouseTarget.y, mouseTarget.ready, mouseTarget.attempts, mouseTarget.retryAt = x, y, false, 0, nil
 		else
-			mouseTarget = { x = x, y = y, attempts = 0, owner = owner, screen = screen }
+			mouseTarget = {x = x, y = y, attempts = 0, owner = owner}
 		end
 		return false
 	end
 	local function pollMouse()
 		local target, now = mouseTarget, tick()
 		if not target then return end
-		if not uiReady() or not isrbxactive() or library.Visible or library.MouseCaptured then mouseTarget, mouseOffsetX, mouseOffsetY = nil, 0, 0; return end
-		if not pointerInside(target.x, target.y) then mouseTarget = nil; return end
-		if target.ready or now < (target.retryAt or 0) then return end
-		if not target.sentAt then
-			target.sentX, target.sentY, target.sentAt = target.x + (target.screen and 0 or mouseOffsetX), target.y + (target.screen and 0 or mouseOffsetY), now
-			if not pointerInside(target.sentX, target.sentY) then mouseTarget, mouseOffsetX, mouseOffsetY = nil, 0, 0; return end
-			mousemoveabs(target.sentX, target.sentY)
-		elseif now - target.sentAt >= 0.04 then
-			local mouse = player:GetMouse()
-			if pointerInside(mouse.X, mouse.Y) then
-				target.ready = math.abs(mouse.X + (target.screen and mouseOffsetX or 0) - target.x) <= 2
-					and math.abs(mouse.Y + (target.screen and mouseOffsetY or 0) - target.y) <= 2
-				mouseOffsetX, mouseOffsetY = target.sentX - mouse.X, target.sentY - mouse.Y
-			else mouseTarget, mouseOffsetX, mouseOffsetY = nil, 0, 0; return end
-			if not target.ready then
-				target.attempts, target.sentAt = target.attempts + 1, nil
-				if target.attempts >= 3 then target.attempts, target.retryAt = 0, now + 0.5 end
-			end
+		if not uiReady() or not isrbxactive() or library.Visible or library.MouseCaptured then mouseTarget = nil; release(1); release(2); return end
+		if not pointerInside(target.x, target.y) then mouseTarget = nil; release(1); release(2); return end
+		local mouse = player:GetMouse()
+		if not finite(mouse.X) or not finite(mouse.Y) then target.ready = false; release(1); release(2); return end
+		if not pointerInside(mouse.X, mouse.Y) then release(1); release(2) end
+		if target.sentAt then
+			local elapsed = now - target.sentAt
+			if elapsed < 0.04 or elapsed < 0.2 and math.abs(mouse.X - target.fromX) < 0.5 and math.abs(mouse.Y - target.fromY) < 0.5 then return end
+			target.sentAt = nil
 		end
+		target.ready = pointerInside(mouse.X, mouse.Y) and math.abs(mouse.X - target.x) <= 2 and math.abs(mouse.Y - target.y) <= 2
+		if target.ready or now < (target.retryAt or 0) then return end
+		-- GetMouse is relative to the current Roblox window; absolute input targets the primary desktop.
+		local dx, dy = math.floor(target.x - mouse.X + 0.5), math.floor(target.y - mouse.Y + 0.5)
+		target.fromX, target.fromY, target.sentAt = mouse.X, mouse.Y, now
+		if type(setrobloxinput) == "function" then setrobloxinput(true) end
+		mousemoverel(dx, dy)
+		target.attempts += 1
+		if target.attempts >= 3 then target.attempts, target.retryAt = 0, now + 0.5 end
 	end
+
 	local function clearWorldFocus()
 		if not worldFocus then return end
 		worldFocus = nil
 		if mouseTarget and mouseTarget.owner == "GardenWork" then mouseTarget = nil end
 		release(2)
 	end
-	local function dragCamera(point: any)
+	local function dragCamera(point: any, horizontalOnly: boolean?)
 		if not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive() then release(2); return end
 		local camera, now = game.Workspace.Camera, tick()
 		local frame = camera and camera.CFrame
@@ -10997,7 +12043,7 @@ local function startStandOut()
 			or not validPosition(frame.RightVector) or not validPosition(frame.UpVector) then release(2); return end
 		local direction = point - frame.Position
 		if direction.Magnitude <= 0.01 then release(2); return end
-		if now - lastAimCamera < 0.04 then return end
+		if now - lastAimCamera < 0.016 then return end
 		local mouse, viewport = player:GetMouse(), camera.ViewportSize
 		if not pointerInside(mouse.X, mouse.Y) then mouseTarget = nil; release(2); return end
 		if not pointerInside(mouse.X, mouse.Y, 24) then
@@ -11008,8 +12054,13 @@ local function startStandOut()
 		end
 		local right, forward, up = direction:Dot(frame.RightVector), direction:Dot(frame.LookVector), direction:Dot(frame.UpVector)
 		local yaw, pitch = math.atan2(right, forward), -math.atan2(up, math.sqrt(right * right + forward * forward))
-		local x = math.clamp(math.clamp(yaw * 600, -160, 160), 8 - mouse.X, viewport.X - 9 - mouse.X)
-		local y = math.clamp(math.clamp(pitch * 600, -120, 120), 8 - mouse.Y, viewport.Y - 9 - mouse.Y)
+		if horizontalOnly then
+			yaw = math.atan2(direction.X * frame.RightVector.X + direction.Z * frame.RightVector.Z,
+				direction.X * frame.LookVector.X + direction.Z * frame.LookVector.Z)
+			pitch = 0
+		end
+		local x = math.clamp(math.clamp(yaw * 1200, -480, 480), 8 - mouse.X, viewport.X - 9 - mouse.X)
+		local y = math.clamp(math.clamp(pitch * 1200, -360, 360), 8 - mouse.Y, viewport.Y - 9 - mouse.Y)
 		if hold(2) then mouseTarget = nil; mousemoverel(x, y); lastAimCamera = now end
 	end
 	local function renderWorldFocus()
@@ -11017,84 +12068,146 @@ local function startStandOut()
 		if not focus then return end
 		local camera = game.Workspace.Camera
 		local cameraOwner = attr(camera, "GrowingCameraOwner")
+		local tabletopOwner = attr(player, "TabletopInputOwner")
 		if not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive() or not focus.target.Parent or not focus.part.Parent
-			or now - focus.requested > 0.4 or attr(player, "GardeningInputLocked") == true
+			or now - focus.requested > 1.5 or attr(player, "GardeningInputLocked") == true
+			or (tabletopOwner ~= nil and tabletopOwner ~= false and tabletopOwner ~= "")
 			or (cameraOwner ~= nil and cameraOwner ~= false and cameraOwner ~= "") then clearWorldFocus(); return end
 		local point = focus.part.Position
 		if not validPosition(point) then clearWorldFocus(); return end
+		local frame = camera.CFrame
+		if focus.frame and ((frame.Position - focus.frame.Position).Magnitude > 0.25
+			or frame.LookVector:Dot(focus.frame.LookVector) < 0.9998
+			or (point - focus.point).Magnitude > 0.25) then focus.readyAt = nil end
 		local screen, visible = WorldToScreen(point)
-		focus.point, focus.at, focus.visible = point, now, visible and screen ~= nil and finite(screen.X) and finite(screen.Y)
-		if focus.visible then focus.x, focus.y = screen.X, screen.Y; release(2) end
+		focus.frame, focus.point, focus.at, focus.visible = frame, point, now, visible and screen ~= nil and finite(screen.X) and finite(screen.Y)
+		if focus.turning then
+			local direction = point - frame.Position
+			if direction.Magnitude > 0.01 and (not focus.visible or focus.centerActor and direction.Unit:Dot(frame.LookVector) < 0.999) then
+				dragCamera(point, not focus.interactionCamera)
+				return
+			end
+			focus.turning, focus.adjusting = false, false
+		end
+		if focus.tilting then
+			if frame.LookVector.Y > -0.9 then dragCamera(frame.Position + v3(0,-30,0)); return end
+			focus.tilting, focus.adjusting = false, false
+		end
+		if focus.visible then focus.x, focus.y = screen.X, screen.Y; if not focus.adjusting then release(2) end end
+		if focus.visible and (focus.interactionCamera == false or focus.adjusting == false) then
+			release(2)
+			focus.adjusting = false
+			mouseMove(focus.x, focus.y, "GardenWork", true)
+		end
 	end
-	local function focusPrompt(target: any, force: boolean?): boolean
-		if not uiReady() then
-			clearWorldFocus()
-			return false
-		end
-		if target and target.Name == "GardenWork" then
-			if library.Visible or library.MouseCaptured or not isrbxactive() then clearWorldFocus(); return false end
-			local cameraOwner = attr(game.Workspace.Camera, "GrowingCameraOwner")
-			if attr(player, "GardeningInputLocked") == true or (cameraOwner ~= nil and cameraOwner ~= false and cameraOwner ~= "") then clearWorldFocus(); return true end
-			if not target.Parent or not getRoot() then clearWorldFocus(); return false end
-			local focus, now = worldFocus, tick()
-			if not focus or focus.address ~= target.Address or not focus.part.Parent then
-				clearWorldFocus()
-				local base = target.Parent
-				for _ = 1, 6 do
-					if not base or base.Name == "Garden Pot" then break end
-					base = base.Parent
-				end
-				local part = base and (child(base, "Dirt") or base)
-				if not part or (part.ClassName ~= "Part" and part.ClassName ~= "MeshPart" and part.ClassName ~= "UnionOperation") then return false end
-				worldFocus = { address = target.Address, target = target, part = part, requested = now, at = 0, visible = false }
-				return false
-			end
-			focus.requested = now
-			if focus.at == 0 or now - focus.at > 0.15 then return false end
-			if not focus.visible then dragCamera(focus.point); return false end
-			return mouseMove(focus.x, focus.y, "GardenWork", true)
-		end
-		if not force and not settings.SupplyCameraFocus then
-			return true
-		end
-		local root, _, character = getRoot()
-		local point, camera = position(target), game.Workspace.Camera
-		if not root or not camera or not validPosition(point) then
-			return false
-		end
-		local now = tick()
-		if now - focusAt < 0.2 and focusAddress == target.Address then
-			local viewport = camera.ViewportSize
-			return mouseMove(viewport.X / 2, viewport.Y / 2)
-		end
+	local function focusPrompt(target: any, interactionCamera: boolean?): boolean
+		if not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive() then clearWorldFocus(); return false end
+		local camera = game.Workspace.Camera
 		local cameraOwner = attr(camera, "GrowingCameraOwner")
-		if attr(player, "GardeningInputLocked") == true or (cameraOwner ~= nil and cameraOwner ~= false and cameraOwner ~= "") then return true end
-		local params = RaycastParams.new()
-		params.FilterType = Enum.RaycastFilterType.Exclude
-		local targetModel = target.Parent
-		for _ = 1, 6 do
-			if not targetModel or targetModel.ClassName == "Model" then
-				break
+		local tabletopOwner = attr(player, "TabletopInputOwner")
+		if attr(player, "GardeningInputLocked") == true or (cameraOwner ~= nil and cameraOwner ~= false and cameraOwner ~= "")
+			or (tabletopOwner ~= nil and tabletopOwner ~= false and tabletopOwner ~= "") then clearWorldFocus(); return true end
+		local root = getRoot()
+		if not target or not target.Parent or not root then clearWorldFocus(); return false end
+		local focus, now = worldFocus, tick()
+		if not focus or focus.address ~= target.Address or not focus.part.Parent then
+			clearWorldFocus()
+			local class = target.ClassName
+			local physical = class == "Part" or class == "MeshPart" or class == "UnionOperation" or class == "Seat" or class == "VehicleSeat"
+			local part = physical and target or target.Parent
+			if target.Name == "GardenWork" then
+				for _ = 1, 6 do
+					if not part or part.Name == "Garden Pot" then break end
+					part = part.Parent
+				end
+				part = part and (child(part, "Dirt") or part)
+			else
+				for _ = 1, 6 do
+					if part and part.ClassName == "Model" then
+						part = child(part, "HumanoidRootPart") or part.PrimaryPart or child(part, "Root") or child(part, "Head") or child(part, "Handle")
+						break
+					end
+					if not part or part.ClassName ~= "Attachment" and validPosition(part.Position) then break end
+					part = part.Parent
+				end
+				if part and part.Name == "HumanoidRootPart" then
+					local actor = part.Parent
+					for _, name in ipairs({"Torso", "UpperTorso", "Head"}) do
+						local body = child(actor, name)
+						if body and validPosition(body.Position) and finite(body.Transparency) and body.Transparency < 0.95 then part = body; break end
+					end
+				end
+				if part and finite(part.Transparency) and part.Transparency >= 0.95 and part.Parent and part.Parent.ClassName == "Model" then
+					local nearest, distance = part, math.huge
+					for _, body in ipairs(part.Parent:GetChildren()) do
+						local class = body.ClassName
+						if (class == "Part" or class == "MeshPart" or class == "UnionOperation") and validPosition(body.Position)
+							and finite(body.Transparency) and body.Transparency < 0.95 then
+							local d = (body.Position - part.Position).Magnitude
+							if d < distance then nearest, distance = body, d end
+						end
+					end
+					part = nearest
+				end
 			end
-			targetModel = targetModel.Parent
-		end
-		params.FilterDescendantsInstances = targetModel and { character, targetModel } or { character }
-		params.IgnoreWater = true
-		if now - lastMove < 0.2 then
+			if not part or not validPosition(part.Position) then return false end
+			local name = target.Name
+			worldFocus = {address=target.Address,target=target,part=part,requested=now,at=0,visible=false,zooms=0,interactionCamera=interactionCamera~=false,
+				overhead=settings.SupplyCameraFocus == true and (name == "GardenWork" or name == "GardenGather" or name == "WorldEventPickup" or name == "WorldItemPickup" or name == "HowlerCaseOpen")}
 			return false
 		end
-		local cameraPosition
-		for _, offset in ipairs({ v3(0, 10, 1.25), v3(0, 6, 0.75), v3(0, 3, 0.4), v3(0, 1.8, 0.25) }) do
-			local candidate = point + offset
-			local hit = game.Workspace:Raycast(candidate, point - candidate, params)
-			if not hit or hit.Distance >= offset.Magnitude - 0.25 then cameraPosition = candidate; break end
+		focus.requested = now
+		focus.interactionCamera = interactionCamera ~= false
+		if focus.at == 0 or now - focus.at > 0.75 then focus.readyAt=nil; return false end
+		local frame = camera and camera.CFrame
+		if not frame or not validPosition(frame.Position) or not validPosition(frame.LookVector) then return false end
+		local point, projectedFrame = focus.part.Position, focus.frame
+		if not validPosition(point) or not projectedFrame or (point - focus.point).Magnitude > 0.25
+			or (frame.Position - projectedFrame.Position).Magnitude > 0.25
+			or frame.LookVector:Dot(projectedFrame.LookVector) < 0.9998 then focus.readyAt=nil;return false end
+		local position = root.Position
+		if focus.interactionCamera and validPosition(position) and math.abs(position.Y - point.Y) < 6
+			and v3(position.X - point.X, 0, position.Z - point.Z).Magnitude < 1.5 then
+			release(2)
+			focus.readyAt = nil
+			move(point + v3(3, 2, 0))
+			return false
 		end
-		if not cameraPosition then setStatus("Supplies", "Waiting for a clear overhead view"); return false end
-		camera.CFrame = lookAt(cameraPosition, point)
-		lastMove, focusAt, focusAddress = now, now, target.Address
-		runtime.Metrics.PositionWrites = runtime.Metrics.PositionWrites + 1
-		local viewport = camera.ViewportSize
-		return mouseMove(viewport.X / 2, viewport.Y / 2)
+		if focus.interactionCamera and (frame.Position - focus.point).Magnitude > 18 and (focus.zoomIns or 0) < 6 then
+			release(2)
+			focus.adjusting, focus.readyAt = true, nil
+			if now >= (focus.zoomAt or 0) then mousescroll(1);focus.zoomIns=(focus.zoomIns or 0)+1;focus.zoomAt=now+0.15 end
+			return false
+		end
+		focus.adjusting = false
+		if focus.overhead and frame.LookVector.Y > -0.5 then focus.overheadReady = false end
+		if focus.overhead and not focus.overheadReady and frame.LookVector.Y > -0.9 then
+			focus.adjusting,focus.readyAt,focus.tilting=true,nil,true
+			dragCamera(frame.Position + v3(0,-30,0))
+			return false
+		end
+		-- shortcut: bound zoom retries at six steps; revisit if native camera limits change.
+		if focus.zooms < 6 and (focus.overhead and not focus.overheadReady and frame.Position.Y - focus.point.Y < 8
+			or focus.interactionCamera and (frame.Position - focus.point).Magnitude < 6) then
+			focus.adjusting,focus.readyAt=true,nil
+			if now >= (focus.zoomAt or 0) then mousescroll(-1);focus.zooms+=1;focus.zoomAt=now+0.15 end
+			return false
+		end
+		focus.overheadReady = focus.overhead
+		local centerActor = target.Name == "BountyIncident_PacoPickup" or target.Name == "BountyIncident_FinishVerity" or target.Name == "BountyIncident_TalkVerity" or target.Name == "StandStorageOpen"
+		if not focus.visible or focus.interactionCamera and centerActor and frame.LookVector:Dot((focus.point - frame.Position).Unit) < 0.999 then
+			focus.adjusting,focus.turning,focus.centerActor=true,true,centerActor
+			focus.readyAt=nil;dragCamera(focus.point, not focus.interactionCamera);return false
+		end
+		release(2)
+		if not mouseMove(focus.x,focus.y,"GardenWork",true) then
+			local mouse = player:GetMouse()
+			-- Native actor animation moves while relative cursor input is acknowledged.
+			if not focus.interactionCamera or not pointerInside(mouse.X, mouse.Y)
+				or math.abs(mouse.X - focus.x) > 8 or math.abs(mouse.Y - focus.y) > 8 then focus.readyAt=nil;return false end
+		end
+		focus.readyAt=focus.readyAt or now
+		return now-focus.readyAt >= 0.06
 	end
 	local function click(gui: any): boolean
 		if not gui or tick() - lastClick < 0.1 then
@@ -11112,8 +12225,9 @@ local function startStandOut()
 		if not mouseMove(x, y, nil, true) then
 			return false
 		end
+		if type(setrobloxinput) == "function" then setrobloxinput(true) end
+		mouse1click()
 		lastClick = tick()
-		tap(1)
 		return true
 	end
 	local function decode(node: any, plain: boolean?): any
@@ -11236,7 +12350,12 @@ local function startStandOut()
 			if interaction and interaction.address == target.Address then release(interaction.key); interaction.done = true end
 			return "blocked"
 		end
-		if attr(target, "StoryPromptAvailable") == false or attr(target, "GardenPromptBlocked") then
+		local actor = target.Parent.Parent
+		local capturedVerity = target.Name == "BountyIncident_FinishVerity" and target.Parent.Name == "HumanoidRootPart"
+			and actor and actor.Name == "Berity" and actor.Parent and actor.Parent.Name == "Incident_Verity"
+			and attr(target, "BountyLeaderId") == player.UserId and attr(actor, "BountyHeldBy") == player.UserId
+		-- Capturing Berity disables his prompt before the finishing hold completes.
+		if attr(target, "StoryPromptAvailable") == false and not capturedVerity or attr(target, "GardenPromptBlocked") then
 			if interaction and interaction.address == target.Address then release(interaction.key); interaction.done = true end
 			return "blocked"
 		end
@@ -11244,10 +12363,16 @@ local function startStandOut()
 			move(point + v3(0, 2.5, 2))
 			return "holding"
 		end
-		if (target.Name == "GardenGather" or target.Name == "GardenWork" or target.Name == "WorldEventPickup" or target.Name == "WorldItemPickup" or target.Name == "HowlerCaseOpen") and not focusPrompt(target, target.Name == "GardenWork") then
-			if target.Name == "GardenWork" then
-				if interaction then release(interaction.key) end
-			else releaseAll() end
+		local panel = attr(target, "StoryProgressGui")
+		local bountyTalk = target.Name == "BountyIncident_TalkVerity" and tonumber(attr(target, "BountyLeaderId")) == player.UserId
+		local tapped = bountyTalk and not panel and not attr(target, "ServerInteraction")
+			or target.Name == "GardenWork" or target.Name == "WorldEventPickup" or target.Name == "WorldItemPickup"
+		local direct = not tapped and target.Name ~= "HowlerCaseOpen" and target.Name ~= "Karaoke" and not panel
+			and (not attr(target, "BountyLeaderId") or bountyTalk) and not attr(target, "GardeningPrompt") and not attr(target, "ServerInteraction")
+		local fallback = interaction and interaction.address == target.Address and interaction.nativeFallback
+		if target.ClassName == "ProximityPrompt" and (not direct or fallback) and not capturedVerity and not focusPrompt(target, true) then
+			if interaction then release(interaction.key) end
+			release(1)
 			return "holding"
 		end
 		local address, now = target.Address, tick()
@@ -11279,18 +12404,19 @@ local function startStandOut()
 		end
 		if not interaction then
 			interaction = { address = address, target = target, at = now, retry = 0, key = bind("Interactables", "H") or 72 }
-			if target.Name == "GardenWork" or target.Name == "WorldEventPickup" or target.Name == "WorldItemPickup" then
+			if tapped then
 				if tap(interaction.key) then interaction.done = true; return "triggered" end
 				interaction = nil
 				return "blocked"
 			end
-			local panel = attr(target, "StoryProgressGui")
-			if target.Name ~= "HowlerCaseOpen" and target.Name ~= "Karaoke" and not panel and not attr(target, "BountyLeaderId") and not attr(target, "GardeningPrompt") then
+			if direct then
 				local ok = pcall(fireproximityprompt, target)
 				if ok then
 					interaction.done = true
 					return "triggered"
 				end
+				interaction.nativeFallback = true
+				return "holding"
 			end
 		end
 		if interaction.done then
@@ -11391,11 +12517,11 @@ local function startStandOut()
 				or "Waiting for the game's input lock to clear")
 			return false
 		end
-		if tick() - lastUmbrella < 3 then
+		if tick() - lastUmbrella < (umbrellaRequestClosing == (closing == true) and 3 or 0.25) then
 			return false
 		end
 		local held = closing and decode(attr(character, "QuickUseHeldItem")) or nil
-		if closing and (not held or held.Name ~= "Black Umbrella" or type(held.ID) ~= "string" or held.ID == "") then
+		if closing and held and (held.Name ~= "Black Umbrella" or type(held.ID) ~= "string" or held.ID == "") then
 			setStatus("AutoUmbrella", "Waiting for the held Black Umbrella ID"); return false
 		end
 		local inventory = decode(child(child(child(player, "Data"), "Stats"), "Inventory"))
@@ -11403,7 +12529,7 @@ local function startStandOut()
 		local entry
 		for _, item in ipairs(inventory) do
 			if type(item) == "table" and item.Name == "Black Umbrella" and type(item.ID) == "string" and item.ID ~= ""
-				and (item.Amount == nil or (finite(item.Amount) and item.Amount > 0)) and (not closing or item.ID == held.ID) then
+				and (item.Amount == nil or (finite(item.Amount) and item.Amount > 0)) and (not closing or not held or item.ID == held.ID) then
 				entry = item; break
 			end
 		end
@@ -11413,19 +12539,23 @@ local function startStandOut()
 		local remote = child(child(game.ReplicatedStorage, "Remotes"), "Item")
 		if not remote or remote.ClassName ~= "RemoteEvent" then setStatus("AutoUmbrella", "Waiting for the Item remote"); return false end
 		releaseAll()
-		lastUmbrella = tick()
+		lastUmbrella, umbrellaRequestClosing = tick(), closing == true
 		local ok, result = pcall(function() return remote:FireServer("Use", entry.Name, entry.ID) end)
 		if not ok or result == false then setStatus("AutoUmbrella", "Unable to use Black Umbrella: " .. tostring(result)); return false end
 		setStatus("AutoUmbrella", closing and "Waiting for Black Umbrella to be put away" or "Waiting for Black Umbrella equipment confirmation")
 		return true
 	end
 	local function protectFromSun(character: any): boolean
+		if currentJob and currentJob.freeHands and currentJob.freeHands() then
+			if umbrellaOpen(character) and not locked() then openUmbrella(character, true); return true end
+			setStatus("AutoUmbrella", "Keeping hands free for the bounty")
+			return false
+		end
 		if not settings.AutoUmbrella then
 			return false
 		end
 		if currentJob and currentJob.name == "Rafts" and currentJob.breaking and currentJob.breaking() then
-			if umbrellaOpen(character) then openUmbrella(character, true); return true end
-			setStatus("AutoUmbrella", "Umbrella put away for raft heavy attacks")
+			if not umbrellaOpen(character) then setStatus("AutoUmbrella", "Umbrella put away for raft heavy attacks") end
 			return false
 		end
 		if attr(character, "VampireActive") ~= true then
@@ -11459,7 +12589,7 @@ local function startStandOut()
 		if not settings.AimAssist or not aimAllowed or not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive()
 			or not aimCameraNeeded or not aimTarget or not aimTarget.Parent or not aimHumanoid or not finite(aimHumanoid.Health)
 			or aimHumanoid.Health <= 0 or tick() - aimUpdated > 0.5 then aimCameraNeeded = false; release(2); return end
-		dragCamera(aimTarget.Position + aimOffset)
+		dragCamera(aimTarget.Position + aimOffset, true)
 	end
 	local function renderAim()
 		if worldFocus then return end
@@ -11475,13 +12605,18 @@ local function startStandOut()
 		if visible and screen and finite(screen.X) and finite(screen.Y) then mouseMove(screen.X, screen.Y, nil, true) end
 	end
 	local function combat(model: any): string
-		if not uiReady() then
+		if not uiReady() or library.Visible or library.MouseCaptured or not isrbxactive() then
+			clearWorldFocus()
+			releaseAll()
 			return "blocked"
 		end
 		local root, _, character = getRoot()
 		local enemy = model and child(model, "HumanoidRootPart")
 		local humanoid = model and child(model, "Humanoid")
-		if not root or not enemy or not humanoid or not finite(humanoid.Health) or humanoid.Health <= 0 then
+		if not root or not model or not model.Parent or not enemy or not enemy.Parent or not humanoid or not humanoid.Parent
+			or not finite(humanoid.Health) or humanoid.Health <= 0 then
+			clearWorldFocus()
+			releaseAll()
 			return "dead"
 		end
 		if settings.AimAssist then aimAt(model) end
@@ -11493,15 +12628,32 @@ local function startStandOut()
 		if not validPosition(point) then
 			return "blocked"
 		end
-		if settings.AimAssist then
-			local mouse = player:GetMouse()
-			if not pointerInside(mouse.X, mouse.Y) then releaseAll(); return "aiming" end
+		local mouse = player:GetMouse()
+		if not pointerInside(mouse.X, mouse.Y) then
+			local camera = game.Workspace.Camera
+			local viewport = camera and camera.ViewportSize
+			if viewport then mouseMove(viewport.X / 2, viewport.Y / 2, "Combat", true) end
+			releaseAll()
+			return "aiming"
+		end
+		local now = tick()
+		local stand = value(child(child(world, "Stands"), player.Name))
+		if stand and not stand.Parent then stand = nil end
+		for _, holder in ipairs({character, stand}) do
+			if attr(holder, "GrabbingItem") or attr(holder, "GrabRequestPending") or attr(holder, "GrabSeekActive")
+				or attr(holder, "Throwing") or attr(holder, "GrabSequenceActive") then releaseAll(); return "throwing" end
+		end
+		local carried = child(character, "Throwable") or child(stand, "Throwable")
+		local aimPart = settings.AimAssist and child(model, "Head") or child(model, "Torso") or child(model, "UpperTorso") or child(model, "Head") or enemy
+		if carried and carried.Parent then
+			focusPrompt(aimPart, false)
+			if now - lastLight >= 0.75 and tap(1) then lastLight = now end
+			return "throwing"
 		end
 		if (root.Position - point).Magnitude > settings.FarmDistance + 2 then
 			move(point + enemy.CFrame.LookVector * -settings.FarmDistance + v3(0, 0.5, 0), point)
 			return "approaching"
 		end
-		local now = tick()
 		local facing = v3(point.X, root.Position.Y, point.Z) - root.Position
 		if facing.Magnitude > 0.01 and root.CFrame.LookVector:Dot(facing.Unit) < 0.98 then
 			if now - lastMove >= 0.2 then
@@ -11512,15 +12664,7 @@ local function startStandOut()
 				return "facing"
 			end
 		end
-		local camera = game.Workspace.Camera
-		if camera and not settings.AimAssist and now - lastMove >= 0.2 then
-			local direction = point + v3(0, 1, 0) - camera.CFrame.Position
-			if direction.Magnitude > 0.01 and camera.CFrame.LookVector:Dot(direction.Unit) < 0.999 then
-				camera.CFrame = lookAt(camera.CFrame.Position, point + v3(0, 1, 0))
-				lastMove = now
-				runtime.Metrics.PositionWrites = runtime.Metrics.PositionWrites + 1
-			end
-		end
+		focusPrompt(aimPart, false)
 		if settings.AutoSummon and attr(character, "Summoned") ~= true and now - lastSummon > 2 then
 			tap(bind("Summon", "E"))
 			lastSummon = now
@@ -11529,8 +12673,7 @@ local function startStandOut()
 		if active and active ~= "" and active ~= false then
 			return "fighting"
 		end
-		if now - lastLight > 0.25 then
-			tap(1)
+		if now - lastLight > 0.25 and tap(1) then
 			lastLight = now
 		end
 		if settings.HeavyAttacks and now - lastHeavy > 2 then
@@ -11573,7 +12716,9 @@ local function startStandOut()
 			end
 			local label = #list == 1 and child(list[1], "Box")
 			local text, number = label and label.Text, #list == 1 and tonumber(list[1].Name)
-			if type(text) == "string" and number and number >= 1 and number <= 9 and text:lower():gsub("^%d+%.%s*", ""):gsub("[%.!?]+$", "") == "see you around" then
+			local answer = type(text) == "string" and text:lower():gsub("^%d+%.%s*", ""):gsub("[%.!?]+$", "")
+			if number and number >= 1 and number <= 9 and (answer == "see you around"
+				or title and title.Text == "Hospital Nurse" and answer == "thank you") then
 				return tap(48 + number)
 			end
 			return false
@@ -11602,6 +12747,7 @@ local function startStandOut()
 		players = players,
 		world = world,
 		now = tick,
+		utcNow = type(os) == "table" and type(os.time) == "function" and os.time or nil,
 		getRoot = getRoot,
 		position = position,
 		attr = attr,
@@ -11632,6 +12778,9 @@ local function startStandOut()
 			keypress(8)
 			task.spawn(function() task.wait(0.08); keyrelease(8) end)
 			return true
+		end,
+		cancelInteraction = function()
+			if interaction then release(interaction.key); interaction = nil end
 		end,
 		interactionBusy = function()
 			return interaction ~= nil and not interaction.done and interaction.retry == 0
@@ -11664,6 +12813,33 @@ local function startStandOut()
 		end
 		collision = {}
 	end
+	local function setWalkspeed(enabled: boolean): boolean
+		if not enabled then
+			if speedOverride and speedOverride.object.Parent and speedOverride.object.Value == speedOverride.applied then
+				speedOverride.object.Value = speedOverride.value
+			end
+			speedOverride = nil
+			return true
+		end
+		local data = child(player, "Data")
+		local speed = child(data, "DefaultSpeed")
+		if not speed or (speed.ClassName ~= "IntValue" and speed.ClassName ~= "NumberValue")
+			or not speed.Parent or speed.Parent.Address ~= data.Address or not finite(speed.Value) then
+			setStatus("Walkspeed", "Waiting for native walk speed")
+			return false
+		end
+		if not speedOverride or speedOverride.object.Address ~= speed.Address then
+			setWalkspeed(false)
+			speedOverride = {object = speed, value = speed.Value}
+		end
+		local selected = settings.WalkSpeed or 24
+		if not finite(selected) then return false end
+		selected = math.floor(math.clamp(selected, 4, 100))
+		if speed.Value ~= selected then speed.Value = selected end
+		speedOverride.applied = selected
+		setStatus("Walkspeed", "Walk speed " .. tostring(selected))
+		return true
+	end
 	local function stop()
 		if not runtime.Running or runtime.Stopping then
 			return
@@ -11678,7 +12854,9 @@ local function startStandOut()
 		runtime.Running = false
 		releaseAll()
 		restoreCollision()
-		task.defer(function()
+		setWalkspeed(false)
+		task.spawn(function()
+			task.wait()
 			for _, connection in ipairs(connections) do
 				connection:Disconnect()
 			end
@@ -11719,6 +12897,7 @@ local function startStandOut()
 			Tooltip = reason,
 			Callback = function(on)
 				settings[key] = on == true and disabled ~= true
+				if key == "Walkspeed" then setWalkspeed(settings[key]) end
 				if settings[key] then
 					if key == "AutoUmbrella" then task.spawn(function() if settings[key] then protectFromSun(player.Character) end end) end
 					local jobName = ({
@@ -11756,6 +12935,7 @@ local function startStandOut()
 			Rounding = 0,
 			Callback = function(v)
 				settings[key] = v
+				if key == "WalkSpeed" and settings.Walkspeed then setWalkspeed(true) end
 			end,
 		})
 	end
@@ -11847,11 +13027,12 @@ local function startStandOut()
 	slider(movementGroup, "JumpVelocity", "Jump height impulse", 70, 35, 140)
 	toggle(movementGroup, "InfiniteJump", "Infinite jump")
 	toggle(movementOther, "Noclip", "Noclip")
-	toggle(movementOther, "Walkspeed", "Walkspeed", true, "Unavailable: a supported game speed field is not verified")
+	toggle(movementOther, "Walkspeed", "Walkspeed")
+	slider(movementOther, "WalkSpeed", "Walk speed", 24, 4, 100)
 	toggle(espGroup, "PlayerESP", "Player ESP")
 	toggle(espGroup, "NpcESP", "NPC ESP")
 	toggle(espGroup, "EnemyESP", "Enemy ESP")
-	toggle(espGroup, "QuestESP", "Available quest ESP")
+	toggle(espGroup, "QuestESP", "Quest ESP")
 	slider(espOptions, "EspDistance", "Maximum distance", 1500, 100, 4000)
 	toggle(espOptions, "EspBoxes", "Boxes")
 	toggle(espOptions, "EspHealth", "Health bars")
@@ -11882,14 +13063,12 @@ local function startStandOut()
 			task.spawn(function() library:Hide() end)
 		end,
 	})
-	local function chooseJob(list: any): any
-		local best, priority = nil, -math.huge
+	local function chooseJob(list: any, minimum: number?): any
+		local best, priority = nil, minimum or -math.huge
 		for _, job in ipairs(list) do
-			if settings[job.toggle] and not runtime.Errors[job.name] and job.ready() then
-				local score = settings[job.priority] or 0
-				if score > priority then
-					best, priority = job, score
-				end
+			local score = settings[job.priority] or 0
+			if score > priority and settings[job.toggle] and not runtime.Errors[job.name] and job.ready() then
+				best, priority = job, score
 			end
 		end
 		return best
@@ -12027,6 +13206,9 @@ local function startStandOut()
 		},
 		{
 			name = "Bounties",
+			freeHands = bounties.NeedsFreeHands,
+			seated = bounties.SeatedAtPaco,
+			carrying = bounties.CarryingPaco,
 			toggle = "AutoBounties",
 			priority = "BountiesPriority",
 			ready = function()
@@ -12065,7 +13247,7 @@ local function startStandOut()
 			toggle = "AutoHarvest",
 			priority = "HarvestPriority",
 			ready = function()
-				return resources.Ready("Harvest")
+				return resources.Ready("Harvest", true)
 			end,
 			step = function()
 				resources.Step("Harvest")
@@ -12074,7 +13256,7 @@ local function startStandOut()
 				return resources.Busy("Harvest")
 			end,
 			stop = function()
-				resources.Stop()
+				resources.Stop("Harvest")
 			end,
 		},
 		{
@@ -12104,7 +13286,7 @@ local function startStandOut()
 			toggle = "AutoSupplies",
 			priority = "SuppliesPriority",
 			ready = function()
-				return resources.Ready("Supplies")
+				return resources.Ready("Supplies", true)
 			end,
 			step = function()
 				resources.Step("Supplies")
@@ -12113,7 +13295,7 @@ local function startStandOut()
 				return resources.Busy("Supplies")
 			end,
 			stop = function()
-				resources.Stop()
+				resources.Stop("Supplies")
 			end,
 		},
 		{
@@ -12125,7 +13307,7 @@ local function startStandOut()
 		},
 		{
 			name = "Crates", toggle = "AutoCrates", priority = "CratesPriority",
-			ready = function() return resources.Ready("Crates") or crateSearchReady() end,
+			ready = function() return resources.Ready("Crates", true) or crateSearchReady() end,
 			step = crateSearchStep,
 			busy = function() return resources.Busy("Crates") end,
 			stop = function() resources.Stop("Crates") end,
@@ -12135,7 +13317,7 @@ local function startStandOut()
 			toggle = "AutoArrows",
 			priority = "ArrowsPriority",
 			ready = function()
-				return resources.Ready("Arrows") or arrowSearchTarget() ~= nil
+				return resources.Ready("Arrows", true) or arrowSearchTarget() ~= nil
 			end,
 			step = function()
 				arrowSearchStep()
@@ -12144,7 +13326,7 @@ local function startStandOut()
 				return resources.Busy("Arrows")
 			end,
 			stop = function()
-				resources.Stop()
+				resources.Stop("Arrows")
 			end,
 		},
 	}
@@ -12365,10 +13547,13 @@ local function startStandOut()
 		local npcFolder = (settings.NpcESP or settings.QuestESP) and child(world, "NPCs") or nil
 		if npcFolder then
 			for _, model in ipairs(npcFolder:GetChildren()) do
-				local root = model.ClassName == "Model"
-						and (child(model, "HumanoidRootPart") or model.PrimaryPart or child(model, "Head"))
-					or nil
-				if root then
+				local root
+				if model.ClassName == "Model" then
+					root = child(model, "HumanoidRootPart")
+					if not root or not validPosition(root.Position) then root = model.PrimaryPart end
+					if not root or not validPosition(root.Position) then root = child(model, "Head") end
+				end
+				if root and validPosition(root.Position) then
 					if settings.NpcESP then
 						esps[#esps + 1] = {
 							name = model.Name,
@@ -12378,14 +13563,16 @@ local function startStandOut()
 						}
 					end
 					if settings.QuestESP then
+						local giver = attr(model, "QuestGiver") == true
 						for _, prompt in ipairs(findPrompts(model)) do
 							if
-								prompt.ClassName == "ProximityPrompt"
-								and attr(prompt, "StoryPromptAvailable") == true
+								(prompt.ClassName == "ProximityPrompt" or giver and prompt.ClassName == "ClickDetector")
+								and attr(prompt, "StoryPromptAvailable") ~= false
 								and (
-									attr(prompt, "StoryQuestIds")
-									or attr(prompt, "StoryAction")
-									or attr(prompt, "BountyLeaderId")
+									giver or attr(prompt, "StoryPromptAvailable") == true and (
+										attr(prompt, "StoryQuestIds") or attr(prompt, "StoryAction")
+										or attr(prompt, "BountyLeaderId") or attr(prompt, "StoryServerDialogue") == true
+									)
 								)
 							then
 								local owner = attr(prompt, "StoryPromptOwnerId")
@@ -12643,7 +13830,7 @@ local function startStandOut()
 					return
 				end
 				pollInteraction()
-				if settings.Fly and not locked() then
+				if settings.Fly and not locked() and not attr(character, "Stunned") and attr(game.Workspace, "TimeScale") ~= 0 then
 					aimAllowed = false
 					if currentJob and currentJob.stop then
 						currentJob.stop()
@@ -12671,28 +13858,49 @@ local function startStandOut()
 						direction = direction - v3(0, 1, 0)
 					end
 					if tick() - lastMove >= 0.2 then
-						lastMove = tick()
-						root.AssemblyLinearVelocity = direction.Magnitude > 0 and direction.Unit * settings.FlySpeed
-							or v3(0, 0, 0)
+						local now = tick()
+						if not flyPoint or flyAddress ~= root.Address or now - flyAt > 0.5 then
+							flyPoint, flyAt, flyVelocityY, flyGravity, flyAddress = root.Position, now - 0.2, nil, 196.2, root.Address
+						end
+						local elapsed = now - flyAt
+						if flyVelocityY then
+							local gravity = (flyVelocityY - root.AssemblyLinearVelocity.Y) / elapsed
+							if finite(gravity) and gravity >= 0 and gravity <= 400 then flyGravity = gravity end
+						end
+						if (flyPoint - root.Position).Magnitude > settings.FlySpeed * elapsed * 2 then flyPoint = root.Position end
+						local movement = direction.Magnitude > 0 and direction.Unit * settings.FlySpeed or v3(0, 0, 0)
+						flyPoint = flyPoint + movement * elapsed
+						-- Gravity continues between the five-per-second updates.
+						local velocity = (flyPoint - root.Position) / elapsed + v3(0, flyGravity * elapsed / 2, 0)
+						root.AssemblyLinearVelocity = velocity
+						lastMove, flyAt, flyVelocityY = now, now, velocity.Y
 						runtime.Metrics.PositionWrites = runtime.Metrics.PositionWrites + 1
 					end
 					return
 				end
+				flyPoint, flyVelocityY, flyAddress = nil, nil, nil
 				local jumpDown = iskeypressed(32)
-				if
-					jumpDown
-					and not jumpWasDown
-					and (settings.InfiniteJump or settings.HighJump)
-					and not locked()
-					and tick() - lastMove >= 0.2
-				then
-					local ground = game.Workspace:Raycast(root.Position, v3(0, -5, 0))
-					if settings.InfiniteJump or ground then
-						local v = root.AssemblyLinearVelocity
-						root.AssemblyLinearVelocity = v3(v.X, settings.JumpVelocity, v.Z)
-						lastMove = tick()
+				if settings.HighJump or settings.InfiniteJump then
+					local velocity, now = root.AssemblyLinearVelocity, tick()
+					if settings.HighJump and jumpDown and not jumpWasDown then highJumpUntil = now + 0.25 end
+					if not settings.HighJump or now > highJumpUntil or locked() or attr(character, "Stunned") then
+						highJumpReady = false
+					elseif lastJumpVelocityY and velocity.Y > 1 and velocity.Y - lastJumpVelocityY > 10 then
+						highJumpReady = true
+					end
+					if
+						(settings.InfiniteJump and jumpDown and not jumpWasDown or highJumpReady)
+						and not locked()
+						and not attr(character, "Stunned") and attr(game.Workspace, "TimeScale") ~= 0
+						and now - lastMove >= 0.2
+					then
+						root.AssemblyLinearVelocity = v3(velocity.X, settings.JumpVelocity, velocity.Z)
+						lastMove, highJumpUntil, highJumpReady = now, 0, false
 						runtime.Metrics.PositionWrites = runtime.Metrics.PositionWrites + 1
 					end
+					lastJumpVelocityY = root.AssemblyLinearVelocity.Y
+				else
+					lastJumpVelocityY, highJumpUntil, highJumpReady = nil, 0, false
 				end
 				jumpWasDown = jumpDown
 				if currentJob and (not settings[currentJob.toggle] or runtime.Errors[currentJob.name]) then
@@ -12704,17 +13912,40 @@ local function startStandOut()
 					releaseAll()
 					interaction = nil
 				end
-				if not (currentJob and currentJob.busy and currentJob.busy()) then
-					local chosen = chooseJob(jobs)
-					if chosen ~= currentJob then
-						if currentJob and currentJob.stop then
-							currentJob.stop()
-						end
+				local busy, chosen = currentJob and currentJob.busy and currentJob.busy(), currentJob
+				if attr(player, "GrowingInputOwner") ~= nil then
+					if currentJob and currentJob.name ~= "Harvest" then
+						if currentJob.stop then currentJob.stop() end
 						releaseAll()
 						clearWorldFocus()
 						interaction = nil
-						currentJob = chosen
+						currentJob, chosen = nil, nil
 					end
+					if not currentJob and settings.AutoHarvest and not runtime.Errors.Harvest then
+						for _, job in ipairs(jobs) do
+							if job.name == "Harvest" and job.ready() then chosen = job; break end
+						end
+					end
+				elseif not locked() and not attr(character, "ArmWrestlingSession") then
+					chosen = chooseJob(jobs, busy and (settings[currentJob.priority] or 0) or nil)
+					if busy and not chosen then chosen = currentJob end
+				elseif not currentJob and settings.AutoBounties and not runtime.Errors.Bounties then
+					local title = child(child(child(child(player, "PlayerGui"), "Dialogue"), "Holder"), "Title")
+					local part = child(child(child(world, "NPCs"), "Petyr"), "HumanoidRootPart")
+					if attr(player, "QTEInputLocked") == true and bounties.Ready()
+						or attr(player, "DialogueInputLocked") == true and type(bounties.ResumeDialogue) == "function" and bounties.ResumeDialogue()
+						or attr(player, "DialogueInputLocked") == true and title and title.Text == "Petyr" and part and part.Parent
+						and validPosition(part.Position) and (root.Position - part.Position).Magnitude <= 8 then
+						for _, job in ipairs(jobs) do if job.name == "Bounties" then chosen = job; break end end
+					end
+				end
+				if chosen ~= currentJob then
+					if currentJob and currentJob.stop then currentJob.stop() end
+					releaseAll()
+					clearWorldFocus()
+					interaction = nil
+					currentJob = chosen
+					if chosen and type(setrobloxinput) == "function" then setrobloxinput(true) end
 				end
 				if currentJob then
 					aimAllowed = settings.AimAssist and not locked() and (currentJob.name == "Bounties" or currentJob.name == "Bosses"
@@ -12772,6 +14003,5 @@ _G.StandOutBootstrap = function()
 	end
 	return result
 end
-
 end
 _G.StandOutBootstrap()
