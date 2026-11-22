@@ -7819,6 +7819,7 @@ _G.StandOutParts.Incidents = function(ctx)
 	local readNative, scanNative = ctx.incidentReadTable or readtbl, ctx.incidentScan or getgc
 	local refreshNative = ctx.incidentRefresh or refreshgc
 	local readMemory, nativeTables = ctx.incidentReadMemory or memory_read, {}
+	local writeMemory = ctx.incidentWriteMemory or memory_write
 	local session, drawingToken, drawingMemory, storageModule, jewelryModule, armModule, verityModule, tabletopModule
 	local armRemote = game.ReplicatedStorage.Remotes.ArmWrestling
 	local tabletopRemote = game.ReplicatedStorage.Remotes.Tabletop
@@ -8014,12 +8015,14 @@ _G.StandOutParts.Incidents = function(ctx)
 		if tabletopModulePointer(refs) ~= candidate.module then return nil end
 		local module, kinds = nativeMap(candidate.module)
 		if not typed(module, kinds, "Session", "table") then return nil end
-		return nativeMap(module.Session)
+		local map, mapKinds = nativeMap(module.Session)
+		return map, mapKinds, module.Session
 	end
-	local function armSnapshot()
+	local function armSnapshot(warming)
 		if not armRemote or armRemote.ClassName ~= "RemoteEvent" or not integer(armRemote.Address, 65536, 281474976710655) then return nil end
+		if not warming and armModule and armModule.warming and #armModule.candidates == 0 then armModule = nil end
 		if not armModule then
-			armModule = {candidates = {}}
+			armModule = {candidates = {}, warming = warming}
 			local ok, rows
 			if ctx.incidentFunctionScan then
 				ok, rows = pcall(ctx.incidentFunctionScan, "GetSession", {GetSession = "function", Stop = "function"})
@@ -8158,7 +8161,7 @@ _G.StandOutParts.Incidents = function(ctx)
 					local pointer = memory("uintptr", row.addr)
 					local refs = closureRefs(pointer)
 					if refs then
-						if row.key == "Start" and #refs == 13 and refs[1].tag == 15 and instancePointer(refs[5].field) == storageRemote.Address then
+						if row.key == "Start" and (#refs == 13 or #refs == 14) and refs[1].tag == 15 and instancePointer(refs[5].field) == storageRemote.Address then
 							starts[pointer] = refs[1].pointer
 						elseif row.key == "Stop" and (#refs == 9 or #refs == 10) and refs[3].tag == 15 then stops[pointer] = refs[3].pointer end
 					end
@@ -8173,7 +8176,7 @@ _G.StandOutParts.Incidents = function(ctx)
 		if #storageModule.candidates ~= 1 then return nil end
 		local candidate = storageModule.candidates[1]
 		local starts, stops = closureRefs(candidate.start), closureRefs(candidate.stop)
-		if not starts or #starts ~= 13 or not stops or (#stops ~= 9 and #stops ~= 10) or starts[1].tag ~= 15 or stops[3].tag ~= 15
+		if not starts or (#starts ~= 13 and #starts ~= 14) or not stops or (#stops ~= 9 and #stops ~= 10) or starts[1].tag ~= 15 or stops[3].tag ~= 15
 			or starts[1].pointer ~= candidate.cell or stops[3].pointer ~= candidate.cell
 			or instancePointer(starts[5].field) ~= storageRemote.Address then return nil end
 		local cell = candidate.cell
@@ -8219,13 +8222,7 @@ _G.StandOutParts.Incidents = function(ctx)
 			if native.Leaving or native.Waiting or native.Picker then say("Go Fish: waiting for the table"); return true end
 			if state.claim or wager.Bounty ~= true then tap(88, "Go Fish: leaving the native table")
 			elseif native.Selected ~= 1 then tap(37, "Go Fish: selecting the bounty wager")
-			elseif native.Action == "Unlock" then
-				local button = cached.storageAction
-				local caption = child(button, "Caption")
-				if button and button.Parent and caption and caption.Text == "CHALLENGE" then
-					if ctx.click(button) then storageModule.nextAction = now + 0.3 end
-					say("Go Fish: starting D'Arby's native challenge")
-				else tap(32, "Go Fish: starting the native bounty game") end
+			elseif native.Action == "Unlock" then tap(13, "Go Fish: starting D'Arby's native challenge")
 			else say("Go Fish: waiting for the bounty wager") end
 			return true
 		end
@@ -8787,18 +8784,28 @@ _G.StandOutParts.Incidents = function(ctx)
 				and typed(map, kinds, "State", "table") and typed(map, kinds, "Steps", "table")
 				and typed(map, kinds, "Props", "table") and typed(map, kinds, "Connections", "table")
 		end
-		local map, kinds
+		local map, kinds, pointer
 		if type(scanFunctions) == "function" then
-			map, kinds = tabletopSnapshot()
+			map, kinds, pointer = tabletopSnapshot()
 		else
 			if not acquire(owner, "Token", { Token = "string", State = "table", Steps = "table", Props = "table", Connections = "table" }, accepts, 128, nil, true) then return nil end
 			map, kinds = readMap(owner.pointer, 128)
+			pointer = owner.pointer
 		end
 		if not accepts(map, kinds) then return nil end
 		local progress, progressKinds = readMap(map.State, 32)
 		if not typed(progress, progressKinds, "Index", "number") or not integer(progress.Count, 1, 64)
 			or not integer(progress.Index, 1, progress.Count + 1) or (progress.Done ~= nil and progressKinds.Done ~= "boolean") then return nil end
 		local result = { Index = progress.Index, Done = progress.Done == true, Ending = map.Ending == true }
+		if owner.viewPointer ~= pointer then owner.viewPointer, owner.sideInfo, owner.overheadInfo, owner.presetView = pointer, nil, nil, nil end
+		if typed(map, kinds, "CameraInfo", "table") then
+			owner.sideInfo = owner.sideInfo or map.CameraInfo
+			local camera, cameraKinds = readMap(owner.sideInfo, 128)
+			owner.overheadInfo = typed(camera, cameraKinds, "Overview", "table") and camera.Overview or owner.overheadInfo
+		end
+		result.Overview = map.Overview == true or owner.overheadInfo ~= nil and map.CameraInfo == owner.overheadInfo
+		result.ViewEligible = owner.overheadInfo ~= nil and not result.Done and not result.Ending
+			and not map.Drag and not map.PendingDrop and progress.HoldStart == nil and map.LocalHold == nil and map.LandingCount == 0
 		if result.Done or result.Ending then return result end
 		local steps, stepKinds = readMap(map.Steps, 64)
 		if not typed(steps, stepKinds, progress.Index, "table") then return nil end
@@ -8806,6 +8813,56 @@ _G.StandOutParts.Incidents = function(ctx)
 		if not step or (step.Kind ~= "Drag" and step.Kind ~= "Click" and step.Kind ~= "Hold" and step.Kind ~= "Wait") then return nil end
 		result.Kind = step.Kind
 		return result
+	end
+	function controller.SetTabletopView(owner, state, overhead)
+		if type(overhead) ~= "boolean" or state.leader ~= player.UserId or type(writeMemory) ~= "function" then return false end
+		local native = controller.TabletopState(owner, state)
+		if not native or not native.ViewEligible then return false end
+		if native.Overview == overhead then return true end
+		local pointer = owner.viewPointer
+		if not integer(pointer, 65536, 281474976710655) then return false end
+		local nodes, slots = pointer, 128
+		if nativeTables[pointer] then
+			local exponent = tableExponent(pointer)
+			if not integer(exponent, 0, 7) then return false end
+			nodes, slots = memory("uintptr", pointer + 40), 2 ^ exponent
+		end
+		local ok, rows = pcall(readNative, nodes, slots)
+		if not ok or type(rows) ~= "table" then return false end
+		local overview, camera
+		for _, row in ipairs(rows) do
+			if row.key == "Overview" and row.type == "boolean" then overview = row.addr
+			elseif row.key == "CameraInfo" then camera = row.addr end
+		end
+		local field, kind, value, tag
+		if overview and memory("int", overview + 12) == 1 then
+			field, kind, value, tag = overview, "int", overhead and 1 or 0, 1
+		else
+			-- A new scene has no Overview key; use its existing native camera preset.
+			field, kind, value, tag = camera, "uintptr", overhead and owner.overheadInfo or owner.sideInfo, 6
+		end
+		if not integer(field, 65536, 281474976710655) or memory("int", field + 12) ~= tag
+			or ctx.attr(player, "TabletopInputOwner") ~= owner.owner then return false end
+		if kind == "uintptr" and (not integer(value, 65536, 281474976710655) or tableExponent(value) == nil) then return false end
+		local latest = controller.TabletopState(owner, state)
+		if not latest or not latest.ViewEligible or owner.viewPointer ~= pointer
+			or nativeTables[pointer] and memory("uintptr", pointer + 40) ~= nodes then return false end
+		local written, result = pcall(writeMemory, kind, field, value)
+		local changed = memory(kind, field) == value
+		if written and changed and kind == "uintptr" then owner.presetView = overhead and pointer or nil end
+		return written and result ~= false and changed
+	end
+	function controller.ReleaseTabletopView(owner, state)
+		if not owner or not owner.presetView or state.leader ~= player.UserId or ctx.now() < (owner.viewCloseAt or 0) then return false end
+		if not controller.TabletopState(owner, state) then return false end
+		local native, kinds, pointer = tabletopSnapshot()
+		if pointer ~= owner.presetView or not typed(native, kinds, "CameraInfo", "table") or native.CameraInfo ~= owner.overheadInfo
+			or native.Token ~= owner.owner or ctx.attr(player, "TabletopInputOwner") ~= owner.owner then return false end
+		-- Preset fallback hides the native toggle; closing restores it on reopening.
+		owner.viewCloseAt = ctx.now() + 0.5
+		local ok, accepted = pcall(function() return tabletopRemote:FireServer("Close", {Token = owner.owner}) end)
+		if ok and accepted ~= false then owner.presetView = nil; return true end
+		return false
 	end
 	function controller.KaraokeSubmitted(owner, state)
 		local index = type(state.active) == "string" and tonumber(state.active:match("^%d+%-(%d+)"))
@@ -8833,7 +8890,7 @@ _G.StandOutParts.Incidents = function(ctx)
 		if index == 10 then
 			if state.armSession then return armWrestling(state, cached.gui) end
 			if not armModule and state.leader == player.UserId and type(state.progress) == "table" and state.progress.IncidentPhase == "table"
-				and (type(scanFunctions) == "function" or type(getgc) == "function") then armSnapshot() end
+				and (type(scanFunctions) == "function" or type(getgc) == "function") then armSnapshot(true) end
 		end
 		local token = ctx.attr(player, "RohanDrawingToken")
 		if index == 11 and type(token) == "string" and token ~= "" then return drawing(state, cached.gui, token) end
@@ -9475,18 +9532,11 @@ _G.StandOutParts.Bounties = function(ctx)
 	end
 
 	local function goFishRoot(gui)
-		cached.storageAction = nil
 		local _, index = parseId(state.active)
 		if not gui or index ~= 13 or ctx.attr(player, "QTEInputLocked") ~= true then return nil end
-		local selected, storageAction, storageAmbiguous
+		local selected
 		for _, root in ipairs(gui:GetChildren()) do
 			if root.ClassName == "ScreenGui" and root.Parent and root.Parent.Address == gui.Address then
-				local panel = child(root, "Panel", true)
-				local title, action = child(panel, "Title"), child(panel, "Action")
-				if title and title.ClassName == "TextLabel" and title.Text == "STAND STORAGE"
-					and action and action.ClassName == "TextButton" then
-					if storageAction then storageAmbiguous = true else storageAction = action end
-				end
 				local speech = child(root, "Speech", true)
 				local stage = speech and speech.Parent
 				local speaker, line = child(speech, "Speaker"), child(speech, "Line")
@@ -9509,7 +9559,6 @@ _G.StandOutParts.Bounties = function(ctx)
 				end
 			end
 		end
-		cached.storageAction = not storageAmbiguous and storageAction or nil
 		return selected
 	end
 
@@ -9771,8 +9820,7 @@ _G.StandOutParts.Bounties = function(ctx)
 		tea.action = label(child(cached.tabletop, "Footer", true), "Action")
 		tea.status = label(child(cached.tabletop, "Footer", true), "Status")
 		tea.actionObject = child(child(cached.tabletop, "Footer", true), "Action")
-		tea.viewObject = child(child(cached.tabletop, "Footer", true), "Reset")
-		tea.view = textOf(tea.viewObject)
+		tea.view = textOf(child(child(cached.tabletop, "Footer", true), "Reset"))
 		tea.target = child(scene, "DropTarget")
 		tea.props, tea.pivots, tea.fills, tea.bands = {}, {}, {}, {}
 		if not scene then
@@ -10232,11 +10280,11 @@ _G.StandOutParts.Bounties = function(ctx)
 		local now = ctx.now()
 		local dragging = tea.stage == "dragStart" or tea.stage == "dragMove"
 		local native = incidents and incidents.TabletopState and incidents.TabletopState(tea, state)
+		if native and native.Overview ~= nil then tea.view = native.Overview and "SIDE VIEW" or "OVERHEAD VIEW" end
 		local step = native and native.Index or tea.status:match("Step%s+(%d+)%s*/") or tea.body:gsub("^Move the highlighted ", "Move the ")
 		if tea.step ~= step then
 			releaseKeys()
 			tea.step, tea.stage, tea.retryAt, tea.failures, tea.failed = step, nil, 0, 0, false
-			tea.viewClicks, tea.viewRetryAt, tea.viewEntering = 0, 0, nil
 			if dragging then return end
 		end
 		if native and (native.Done or native.Ending or native.Kind == "Wait") then
@@ -10282,39 +10330,14 @@ _G.StandOutParts.Bounties = function(ctx)
 			say("Iced tea: waiting for the native recipe step", "IcedTea")
 			return
 		end
-		-- The native view button can stop responding during a drag step.
 		if tea.view == "OVERHEAD VIEW" and (tea.body:find("Hold to pour", 1, true)
 			or tea.target and tea.target.Transparency < 0.9 and tea.body:find("Move the highlighted", 1, true)) then
-			if tea.stage == "hold" then releaseKeys(); tea.stage = nil; return end
-			if native and native.ViewEligible == false then say("Iced tea: waiting for the native view control", "IcedTea"); return end
-			if now < (tea.viewRetryAt or 0) then return end
-			if (tea.viewClicks or 0) >= 6 then
-				tea.failed = true
-				say("Iced tea needs native view confirmation", "IcedTea")
-				return
-			end
-			local p, size = tea.viewObject.AbsolutePosition, tea.viewObject.AbsoluteSize
-			local clicked
-			if p and size and (size.X <= 1 or size.Y <= 1) and finite(p.X) and finite(p.Y) then
-				-- shortcut: native Reset uses this measured interior; recalibrate if its layout changes.
-				if not tea.viewEntering then
-					if ctx.mouseMove(p.X + 84, p.Y - 100, nil, true) then
-						tea.viewEntering, tea.viewRetryAt = true, now + 0.1
-					end
-					return
-				end
-				clicked = ctx.mouseMove(p.X + 84, p.Y + 40, nil, true)
-				if clicked then
-					if type(setrobloxinput) == "function" then setrobloxinput(true) end
-					mouse1click()
-				end
-			else clicked = ctx.click(tea.viewObject) end
-			if clicked then
-				tea.viewClicks = (tea.viewClicks or 0) + 1
-				tea.viewEntering = nil
-				tea.viewRetryAt, state.nextAction = now + 1, now + 1
-			end
-			say("Iced tea: opening the native overhead view", "IcedTea")
+			releaseKeys()
+			if tea.stage == "hold" then tea.stage = nil; return end
+			if incidents and incidents.SetTabletopView and incidents.SetTabletopView(tea, state, true) then
+				state.nextAction = now + 0.1
+				say("Iced tea: switching the native camera view", "IcedTea")
+			else say("Iced tea: waiting for the native view control", "IcedTea") end
 			return
 		end
 		if tea.target and tea.target.Transparency < 0.9 and tea.body:find("Move the highlighted", 1, true) then
@@ -10802,10 +10825,10 @@ _G.StandOutParts.Bounties = function(ctx)
 
 	function module.Pause()
 		releaseKeys()
+		if tea and incidents and incidents.ReleaseTabletopView then incidents.ReleaseTabletopView(tea, state) end
 		state.pacoExitAt = nil
 		if tea and tea.failed then
 			tea.failed, tea.failures, tea.stage, tea.retryAt = false, 0, nil, ctx.now() + 0.2
-			tea.viewClicks, tea.viewRetryAt = 0, 0
 		end
 		if tea and (tea.stage == "dragStart" or tea.stage == "dragMove") then
 			tea.stage, tea.retryAt = nil, ctx.now() + 0.2
@@ -10815,6 +10838,7 @@ _G.StandOutParts.Bounties = function(ctx)
 	function module.Stop()
 		if incidents then incidents.Stop() end
 		releaseKeys()
+		if tea and incidents and incidents.ReleaseTabletopView then incidents.ReleaseTabletopView(tea, state) end
 		executing, busy = false, false
 		state.menuStage = nil
 		state.pacoExitAt = nil
@@ -12351,6 +12375,13 @@ local function startStandOut()
 			return "blocked"
 		end
 		local actor = target.Parent.Parent
+		if interaction and interaction.address == target.Address and (attr(player, "DialogueInputLocked") or attr(player, "GardeningInputLocked")
+			or attr(player, "TabletopInputOwner") or attr(player, "JewelryInspecting") == true or attr(player, "QTEInputLocked") == true) then
+			release(interaction.key)
+			clearWorldFocus()
+			interaction.done = true
+			return "triggered"
+		end
 		local capturedVerity = target.Name == "BountyIncident_FinishVerity" and target.Parent.Name == "HumanoidRootPart"
 			and actor and actor.Name == "Berity" and actor.Parent and actor.Parent.Name == "Incident_Verity"
 			and attr(target, "BountyLeaderId") == player.UserId and attr(actor, "BountyHeldBy") == player.UserId
@@ -12425,6 +12456,7 @@ local function startStandOut()
 		if attr(player, "DialogueInputLocked") or attr(player, "GardeningInputLocked")
 			or attr(player, "TabletopInputOwner") or attr(player, "JewelryInspecting") == true or attr(player, "QTEInputLocked") == true then
 			release(interaction.key)
+			clearWorldFocus()
 			interaction.done = true
 			return "triggered"
 		end
