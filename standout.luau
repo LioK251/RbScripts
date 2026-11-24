@@ -9960,7 +9960,8 @@ _G.StandOutParts.Bounties = function(ctx)
 			state.pacoSession, state.pacoCharacter = state.armSession, character.Address
 		end
 		state.dialogue = ctx.attr(player, "DialogueInputLocked") == true
-		state.inputLock = ctx.attr(player, "QTEInputLocked") == true
+		local inputLock = ctx.attr(player, "QTEInputLocked")
+		state.inputLock = inputLock == true or type(inputLock) == "string" and inputLock ~= ""
 		local observed = tostring(state.active) .. "|" .. cached.objective .. "|" .. tostring(state.claim)
 			.. "|" .. tostring(state.stepIndex) .. "|" .. tostring(state.phase) .. "|" .. tostring(state.targetPath) .. "|" .. tostring(state.targetName)
 		if observed ~= lastObserved then
@@ -10609,6 +10610,18 @@ _G.StandOutParts.Bounties = function(ctx)
 		if ctx.now() < state.nextAction then
 			busy = state.menuStage ~= nil or state.karaokeSession ~= nil or state.teaOwner ~= nil or state.inputLock
 			return busy
+		end
+		if activeIndex == 11 and state.claim and type(state.progress) == "table" and state.progress.ReadyToClaim == true
+			and state.leader == player.UserId then
+			local token = ctx.attr(player, "RohanDrawingToken")
+			local panel = child(child(child(cached.gui, "HeavensDoorBook"), "Root"), "DrawingContest")
+			if panel and type(token) == "string" and token ~= "" and ctx.attr(player, "QTEInputLocked") == token then
+				releaseKeys()
+				busy = true
+				if ctx.click(child(panel, "Close")) then state.nextAction = ctx.now() + 0.2 end
+				say("Rohan: closing the completed drawing contest", "Rohan")
+				return true
+			end
 		end
 		if (activeIndex == 13 or state.active == nil) and state.inputLock and not state.dialogue then
 			if goFishStep() then return true end
@@ -12803,7 +12816,8 @@ local function startStandOut()
 			local text, number = label and label.Text, #list == 1 and tonumber(list[1].Name)
 			local answer = type(text) == "string" and text:lower():gsub("^%d+%.%s*", ""):gsub("[%.!?]+$", "")
 			if number and number >= 1 and number <= 9 and (answer == "see you around"
-				or title and title.Text == "Hospital Nurse" and answer == "thank you") then
+				or title and title.Text == "Hospital Nurse" and answer == "thank you"
+				or title and title.Text == "Rohan Kishibe" and answer == "i'll be back") then
 				return tap(48 + number)
 			end
 			return false
@@ -14016,7 +14030,8 @@ local function startStandOut()
 				elseif not currentJob and settings.AutoBounties and not runtime.Errors.Bounties then
 					local title = child(child(child(child(player, "PlayerGui"), "Dialogue"), "Holder"), "Title")
 					local part = child(child(child(world, "NPCs"), "Petyr"), "HumanoidRootPart")
-					if attr(player, "QTEInputLocked") == true and bounties.Ready()
+					local qte = attr(player, "QTEInputLocked")
+					if (qte == true or type(qte) == "string" and qte ~= "") and bounties.Ready()
 						or attr(player, "DialogueInputLocked") == true and type(bounties.ResumeDialogue) == "function" and bounties.ResumeDialogue()
 						or attr(player, "DialogueInputLocked") == true and title and title.Text == "Petyr" and part and part.Parent
 						and validPosition(part.Position) and (root.Position - part.Position).Magnitude <= 8 then
