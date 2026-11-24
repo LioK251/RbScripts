@@ -12041,7 +12041,7 @@ local function startStandOut()
 		if currentJob and currentJob.seated and currentJob.seated() then return false end
 		if currentJob and currentJob.carrying and currentJob.carrying() then
 			local delta = p - root.Position
-			if delta.Magnitude > 6 then p = root.Position + delta.Unit * 6 end
+			if delta.Magnitude > 12 then p = root.Position + delta.Unit * 12 end
 		end
 		local now = tick()
 		if now - lastMove < 0.2 or (root.Position - p).Magnitude < 1.5 then
